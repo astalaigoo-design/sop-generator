@@ -15,9 +15,7 @@ if not api_key:
 genai.configure(api_key=api_key)
 
 def generate_sop(raw_text):
-    # 'gemini-1.5-flash' is the most compatible name across all regions
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
+    model = genai.GenerativeModel('gemini-2.5-flash')
     prompt = f"Convert this transcript into a professional SOP with sections: Title, Goal, Steps, and Troubleshooting:\n\n{raw_text}"
     
     try:
