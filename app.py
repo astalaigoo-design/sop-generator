@@ -15,18 +15,17 @@ if not api_key:
 genai.configure(api_key=api_key)
 
 def generate_sop(raw_text):
-    # Use 'gemini-pro' - it is the most stable name across all API versions
-    model = genai.GenerativeModel('gemini-pro') 
+    # 'gemini-1.5-flash' is the most compatible name across all regions
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"Convert this transcript into a professional SOP with sections: Title, Goal, Steps, and Troubleshooting:\n\n{raw_text}"
     
     try:
-        # We add a safety check for the response
-        response = model.generate_content(prompt)
+        # We add 'stream=False' to force a standard connection
+        response = model.generate_content(prompt, stream=False)
         return response.text
     except Exception as e:
-        # This will tell us if it's a model issue or something else
-        return f"Model Error: {str(e)}"
+        return f"System Message: {str(e)}"
 
 # UI
 raw_input = st.text_area("Paste notes or transcript here:", height=300)
