@@ -32,7 +32,7 @@ with st.sidebar:
                     file_name=f"{topic.replace(' ', '_')}_SOP.txt",
                     mime="text/plain"
                 )
-                except Exception as e:
+             except Exception as e:
                     st.error(f"Something went wrong: {e}")
 
                 st.write("Using Model: **Gemini 2.0 Flash**")
