@@ -46,16 +46,22 @@ Format with bold headers and bullet points.
 # 1. Setup the Model (Keep this)
 model = genai.GenerativeModel("gemini-2.0-flash")
 
-# 2. Add an Input Box (This goes where you want the user to type)
-# Place this at line 50 or so
-topic = st.text_input("Enter your SOP topic:")
+topic = st.text_input("Enter SOP Topic (e.g., How to clean a printer)")
 
-if st.button("Generate"):
-    # The API is only called when the user clicks this button
-    response = model.generate_content(f"Write a professional SOP for: {topic}")
-    st.write(response.text)
-
-
+# This button is the "Shield" that stops the rate limit errors
+if st.button("Generate SOP"):
+    if topic:
+        try:
+            with st.spinner("Writing... please wait."):
+                response = model.generate_content(f"Write a professional SOP for: {topic}")
+                st.markdown(response.text)
+        except Exception as e:
+            if "429" in str(e) or "ResourceExhausted" in str(e):
+                st.error("Too many requests! Wait 60 seconds and try again.")
+            else:
+                st.error(f"Error: {e}")
+    else:
+        st.warning("Please type a topic first!")
 
 
 # UI
