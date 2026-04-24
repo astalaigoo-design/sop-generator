@@ -19,8 +19,7 @@ def generate_sop(raw_text):
     prompt = f"Convert this transcript into a professional SOP with sections: Title, Goal, Steps, and Troubleshooting:\n\n{raw_text}"
     
 
-     import os, json, google.generativeai as genai
-
+    import os, json, google.generativeai as genai
 # 1. Setup
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
