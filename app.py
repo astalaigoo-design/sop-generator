@@ -16,16 +16,16 @@ with st.sidebar:
         with st.spinner("Processing..."):        
             try: 
                 
-                     model = genai.GenerativeModel('gemini-2.0-flash')
-                     response = model.generate_content(f"Create an SOP for {topic}. Notes: {raw_notes}")
+                 model = genai.GenerativeModel('gemini-2.0-flash')
+                 response = model.generate_content(f"Create an SOP for {topic}. Notes: {raw_notes}")
                 
                 # 1. Store the text so we can use it multiple times
-                    sop_text = response.text
+                 sop_text = response.text
 
-                    st.subheader("Generated SOP")
+                 st.subheader("Generated SOP")
                 
                 # 2. Display with "Copy" icon (using st.code)
-                    st.code(sop_text, language="markdown")
+                 st.code(sop_text, language="markdown")
 
                 # 3. Add the Download Button
                     st.download_button(
