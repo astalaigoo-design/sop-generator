@@ -38,10 +38,10 @@ with st.sidebar:
                 except Exception as e:
                 st.error(f"Something went wrong: {e}")
 
-    st.write("Using Model: **Gemini 2.0 Flash**")
+                st.write("Using Model: **Gemini 2.0 Flash**")
 
-st.set_page_config(page_title="AI SOP Generator", layout="wide")
-st.title("⚡ SOP Generator")
+                st.set_page_config(page_title="AI SOP Generator", layout="wide")
+                st.title("⚡ SOP Generator")
 
 # Simplified API Setup for Local Testing
 api_key = st.sidebar.text_input("Enter Google API Key", type="password")
