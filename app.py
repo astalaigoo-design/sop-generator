@@ -42,7 +42,7 @@ if st.button("Generate SOP"):
                 full_prompt = f"Create a formal SOP for {topic}. Notes: {raw_notes}"
                 
                 # Using the confirmed working model
-                model = genai.GenerativeModel('gemini-2.0-flash')
+                model = genai.GenerativeModel('gemini-1.5-flash-8b')      
                 response = model.generate_content(full_prompt)
                 
                 # Display result
