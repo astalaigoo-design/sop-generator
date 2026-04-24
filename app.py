@@ -19,11 +19,33 @@ def generate_sop(raw_text):
     prompt = f"Convert this transcript into a professional SOP with sections: Title, Goal, Steps, and Troubleshooting:\n\n{raw_text}"
     
     try:
-        # We add 'stream=False' to force a standard connection
-        response = model.generate_content(prompt, stream=False)
-        return response.text
-    except Exception as e:
-        return f"System Message: {str(e)}"
+     import os, json, google.generativeai as genai
+
+# 1. Setup
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# 2. The Refined Prompt
+prompt = """
+Write a professional Standard Operating Procedure (SOP) for: [INSERT TOPIC HERE].
+
+Please follow this exact structure:
+1.  **Title**: Bold and clear.
+2.  **Scope**: Who is this for and when should it be done?
+3.  **Prerequisites**: Tools or supplies needed.
+4.  **Safety Warnings**: Highlight any risks.
+5.  **Step-by-Step Instructions**: Use numbered lists with action verbs.
+6.  **Verification**: How to check if it's done right.
+
+Format with bold headers and bullet points.
+"""
+
+# 3. Use the working model (2.0 or 2.5)
+model = genai.GenerativeModel("gemini-2.0-flash")
+
+# 4. Generate and Print
+response = model.generate_content(prompt)
+print(response.text)
+
 
 # UI
 raw_input = st.text_area("Paste notes or transcript here:", height=300)
