@@ -20,13 +20,13 @@ with st.sidebar:
                   # 1. Store the text so we can use it multiple times
                    sop_text = response.text
 
-                   st.subheader("Generated SOP")
+                st.subheader("Generated SOP")
                 
                   # 2. Display with "Copy" icon (using st.code)
-                   st.code(sop_text, language="markdown")
+                st.code(sop_text, language="markdown")
 
                   # 3. Add the Download Button
-                    st.download_button(
+                st.download_button(
                     label="📥 Download SOP as Text File",
                     data=sop_text,
                     file_name=f"{topic.replace(' ', '_')}_SOP.txt",
