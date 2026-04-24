@@ -25,7 +25,7 @@ import google.generativeai as genai
 import streamlit as st
 
 # Configure the API key using the environment variable
-genai.configure(api_key=st.secrets["AIzaSyAU4EqsctYOwW6nFkZd3VUCgj9GLrkyQcw"])
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 
 # 2. The Refined Prompt
