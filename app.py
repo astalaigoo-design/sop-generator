@@ -9,6 +9,32 @@ with st.sidebar:
     4. Copy the result into your document!
     """)
     st.markdown("---")
+    if st.button("Generate SOP"):
+    if topic or raw_notes:
+        with st.spinner("Processing..."):
+            try:
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                response = model.generate_content(f"Create an SOP for {topic}. Notes: {raw_notes}")
+                
+                # 1. Store the text so we can use it multiple times
+                sop_text = response.text
+
+                st.subheader("Generated SOP")
+                
+                # 2. Display with "Copy" icon (using st.code)
+                st.code(sop_text, language="markdown")
+
+                # 3. Add the Download Button
+                st.download_button(
+                    label="📥 Download SOP as Text File",
+                    data=sop_text,
+                    file_name=f"{topic.replace(' ', '_')}_SOP.txt",
+                    mime="text/plain"
+                )
+                
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
+
     st.write("Using Model: **Gemini 2.0 Flash**")
 
 st.set_page_config(page_title="AI SOP Generator", layout="wide")
