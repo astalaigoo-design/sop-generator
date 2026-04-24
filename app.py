@@ -8,8 +8,10 @@ with st.sidebar:
     3. Click **Generate SOP**.
     4. Copy the result into your document!
     """)
-    st.markdown("---")
-    if st.button("Generate SOP"):
+    st.markdown("---") 
+    
+    if st.button("Generate SOP"): 
+        
     if topic or raw_notes:
         with st.spinner("Processing..."):
             try:
