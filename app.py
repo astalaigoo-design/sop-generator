@@ -1,6 +1,31 @@
 import streamlit as st
 import google.generativeai as genai
 import streamlit as st
+import streamlit as st
+import base64
+
+# Copy your SVG code into this variable
+svg_code = """
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 80" width="240" height="80">
+  <rect x="0" y="0" width="240" height="80" fill="#ffffff" rx="12" ry="12"/>
+  <g transform="translate(20,40)">
+    <circle cx="0" cy="0" r="24" fill="#0A74DA"/>
+    <circle cx="8" cy="-6" r="12" fill="#ffffff"/>
+  </g>
+  <text x="70" y="48" font-family="Arial" font-size="36" font-weight="600" fill="#222222">PRO</text>
+  <text x="70" y="70" font-family="Arial" font-size="14" fill="#555555">Your Tagline Here</text>
+</svg>
+"""
+
+# Helper function to display SVG
+def render_svg(svg):
+    b64 = base64.b64encode(svg.encode('utf-8')).decode("utf-8")
+    html = f'<img src="data:image/svg+xml;base64,{b64}" width="200"/>'
+    st.sidebar.write(html, unsafe_allow_html=True)
+
+# Use it in your sidebar
+with st.sidebar:
+    render_svg(svg_code)
 
 st.set_page_config(page_title="My Tool", page_icon="🧰")
 logo = "assets/logo.png"
