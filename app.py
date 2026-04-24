@@ -20,58 +20,36 @@ def generate_sop(raw_text):
     prompt = f"Convert this transcript into a professional SOP with sections: Title, Goal, Steps, and Troubleshooting:\n\n{raw_text}"
     
 
-    import os, json, google.generativeai as genai
-# 1. Setupimport os
+   
+import os
 import google.generativeai as genai
 import streamlit as st
 
-# Configure the API key using the environment variable
+# 1. Setup
+st.title("SOP Generator")
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
+# 2. Inputs
+topic = st.text_input("Enter SOP Topic", placeholder="How to clean a printer")
+raw_notes = st.text_area("Paste notes here")
 
-# 2. The Refined Prompt
-prompt = """
-Write a professional Standard Operating Procedure (SOP) for: [INSERT TOPIC HERE].
-
-Please follow this exact structure:
-1.  **Title**: Bold and clear.
-2.  **Scope**: Who is this for and when should it be done?
-3.  **Prerequisites**: Tools or supplies needed.
-4.  **Safety Warnings**: Highlight any risks.
-5.  **Step-by-Step Instructions**: Use numbered lists with action verbs.
-6.  **Verification**: How to check if it's done right.
-
-Format with bold headers and bullet points.
-"""
-
-# 1. Setup the Model (Keep this)
-model = genai.GenerativeModel("gemini-2.0-flash")
-
-topic = st.text_input("Enter SOP Topic (e.g., How to clean a printer)")
-
-# This button is the "Shield" that stops the rate limit errors
+# 3. Action
 if st.button("Generate SOP"):
-    if topic:
-        try:
-            with st.spinner("Writing... please wait."):
-                response = model.generate_content(f"Write a professional SOP for: {topic}")
+    if topic or raw_notes:
+        with st.spinner("Processing..."):
+            try:
+                # Combine inputs for the AI
+                full_prompt = f"Create a formal SOP for {topic}. Notes: {raw_notes}"
+                
+                # Using the confirmed working model
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                response = model.generate_content(full_prompt)
+                
+                # Display result
+                st.subheader("Generated SOP")
                 st.markdown(response.text)
-        except Exception as e:
-            if "429" in str(e) or "ResourceExhausted" in str(e):
-                st.error("Too many requests! Wait 60 seconds and try again.")
-            else:
-                st.error(f"Error: {e}")
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
     else:
-        st.warning("Please type a topic first!")
-
-
-# UI
-raw_input = st.text_area("Paste notes or transcript here:", height=300)
-if st.button("Generate SOP ✨"):
-    if raw_input:
-        with st.spinner("Engineering your SOP..."):
-            result = generate_sop(raw_input)
-            st.markdown(result)
-    else:
-        st.error("Please paste some text first!")
+        st.warning("Please provide a topic or some notes first!")
 
