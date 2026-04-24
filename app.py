@@ -79,18 +79,12 @@ if st.button("Generate SOP"):
     if topic or raw_notes:
         with st.spinner("Processing..."):
             try:
-                # Combine inputs for the AI
-                full_prompt = f"Create a formal SOP for {topic}. Notes: {raw_notes}"
-                
-                # Using the confirmed working model
-                model = genai.GenerativeModel('gemini-1.5-flash-8b')      
-                response = model.generate_content(full_prompt)
-                
-                # Display result
-                st.subheader("Generated SOP")
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                response = model.generate_content(f"SOP for {topic}")
                 st.markdown(response.text)
             except Exception as e:
                 st.error(f"Something went wrong: {e}")
+              
     else:
         st.warning("Please provide a topic or some notes first!")
 
