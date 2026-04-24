@@ -20,8 +20,13 @@ def generate_sop(raw_text):
     
 
     import os, json, google.generativeai as genai
-# 1. Setup
+# 1. Setupimport os
+import google.generativeai as genai
+import streamlit as st
+
+# Configure the API key using the environment variable
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
 
 # 2. The Refined Prompt
 prompt = """
