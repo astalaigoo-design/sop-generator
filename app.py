@@ -36,7 +36,7 @@ with st.sidebar:
                 )
                 
                 except Exception as e:
-                st.error(f"Something went wrong: {e}")
+                    st.error(f"Something went wrong: {e}")
 
                 st.write("Using Model: **Gemini 2.0 Flash**")
 
