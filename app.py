@@ -1,3 +1,13 @@
+with st.sidebar:
+    st.title("How to use")
+    st.info("""
+    1. Enter a clear **Topic**.
+    2. Paste any **raw notes** or transcripts.
+    3. Click **Generate SOP**.
+    4. Copy the result into your document!
+    """)
+    st.markdown("---")
+    st.write("Using Model: **Gemini 2.0 Flash**")
 import streamlit as st
 import google.generativeai as genai
 
