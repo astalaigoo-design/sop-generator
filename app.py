@@ -16,7 +16,9 @@ genai.configure(api_key=api_key)
 
 def generate_sop(raw_text):
     import google.generativeai as genai
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    # Change from 1.5 to 2.5 or 3.0
+    model = genai.GenerativeModel('gemini-2.5-flash') 
+    # Alternative for speed: 'gemini-3-flash'
     prompt = f"Convert this transcript into a professional SOP with sections: Title, Goal, Steps, and Troubleshooting:\n\n{raw_text}"
     
 
