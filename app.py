@@ -43,12 +43,21 @@ Please follow this exact structure:
 Format with bold headers and bullet points.
 """
 
-# 3. Use the working model (2.0 or 2.5)
+# 1. Setup the Model (Keep this)
 model = genai.GenerativeModel("gemini-2.0-flash")
 
-# 4. Generate and Print
-response = model.generate_content(prompt)
-print(response.text)
+# 2. Add an Input Box (This goes where you want the user to type)
+topic = st.text_input("What is the SOP topic?")
+
+# 3. WRAP THE GENERATION IN THIS BUTTON BLOCK:
+if st.button("Generate SOP"):
+    if topic:
+        with st.spinner("Writing your SOP..."):
+            response = model.generate_content(f"Write a professional SOP for: {topic}")
+            st.markdown(response.text)
+    else:
+        st.error("Please enter a topic before clicking the button.")
+
 
 
 # UI
