@@ -12,7 +12,7 @@ with st.sidebar:
     
     if st.button("Generate SOP"):   
         
-    if topic or raw_notes:    
+        if topic or raw_notes:    
         with st.spinner("Processing..."):        
             try: 
                 
