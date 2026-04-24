@@ -10,11 +10,12 @@ with st.sidebar:
     """)
     st.markdown("---") 
     
-    if st.button("Generate SOP"): 
+    if st.button("Generate SOP"):   
         
-    if topic or raw_notes:
-        with st.spinner("Processing..."):
-            try:
+    if topic or raw_notes:    
+        with st.spinner("Processing..."):        
+            try: 
+                
                      model = genai.GenerativeModel('gemini-2.0-flash')
                      response = model.generate_content(f"Create an SOP for {topic}. Notes: {raw_notes}")
                 
