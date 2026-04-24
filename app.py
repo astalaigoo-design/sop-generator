@@ -13,8 +13,8 @@ with st.sidebar:
     if topic or raw_notes:
         with st.spinner("Processing..."):
             try:
-                model = genai.GenerativeModel('gemini-2.0-flash')
-                response = model.generate_content(f"Create an SOP for {topic}. Notes: {raw_notes}")
+                   model = genai.GenerativeModel('gemini-2.0-flash')
+                   response = model.generate_content(f"Create an SOP for {topic}. Notes: {raw_notes}")
                 
                 # 1. Store the text so we can use it multiple times
                 sop_text = response.text
