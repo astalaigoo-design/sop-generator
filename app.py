@@ -1,5 +1,22 @@
 import streamlit as st
 import google.generativeai as genai
+import streamlit as st
+
+st.set_page_config(page_title="My Tool", page_icon="🧰")
+logo = "assets/logo.png"
+
+# Sidebar logo
+with st.sidebar:
+    st.image(logo, width=150)
+
+# Top‑centered header with logo next to the text
+col1, col2 = st.columns([1, 8])
+with col1:
+    st.image(logo, width=60)
+with col2:
+    st.title("My Professional Dashboard")
+
+st.write("Your app content goes here …")
 with st.sidebar:
     st.title("How to use")
     st.info("""
