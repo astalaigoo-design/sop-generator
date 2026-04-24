@@ -28,7 +28,7 @@ with st.sidebar:
                  st.code(sop_text, language="markdown")
 
                 # 3. Add the Download Button
-                    st.download_button(
+                 st.download_button(
                     label="📥 Download SOP as Text File",
                     data=sop_text,
                     file_name=f"{topic.replace(' ', '_')}_SOP.txt",
