@@ -1,48 +1,36 @@
 import streamlit as st
-import google.generativeai as genai
-import streamlit as st
-import streamlit as st
 import base64
 
-# Copy your SVG code into this variable
+# 1. Your SVG Code as a string
 svg_code = """
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 80" width="240" height="80">
+<svg xmlns="http://w3.org" viewBox="0 0 240 80" width="240" height="80">
   <rect x="0" y="0" width="240" height="80" fill="#ffffff" rx="12" ry="12"/>
   <g transform="translate(20,40)">
     <circle cx="0" cy="0" r="24" fill="#0A74DA"/>
     <circle cx="8" cy="-6" r="12" fill="#ffffff"/>
   </g>
-  <text x="70" y="48" font-family="Arial" font-size="36" font-weight="600" fill="#222222">PRO</text>
-  <text x="70" y="70" font-family="Arial" font-size="14" fill="#555555">Your Tagline Here</text>
+  <text x="70" y="48" font-family="Arial" font-size="36" font-weight="600" fill="#222222">SOP</text>
+  <text x="70" y="70" font-family="Arial" font-size="14" fill="#555555">AI Generator</text>
 </svg>
 """
 
-# Helper function to display SVG
+# 2. Function to display it
 def render_svg(svg):
     b64 = base64.b64encode(svg.encode('utf-8')).decode("utf-8")
-    html = f'<img src="data:image/svg+xml;base64,{b64}" width="200"/>'
-    st.sidebar.write(html, unsafe_allow_html=True)
+    return f'data:image/svg+xml;base64,{b64}'
 
-# Use it in your sidebar
-with st.sidebar:
-    render_svg(svg_code)
+logo_url = render_svg(svg_code)
 
-st.set_page_config(page_title="My Tool", page_icon="🧰")
-logo = "assets/logo.png"
+# 3. Use it in the sidebar
+st.sidebar.image(logo_url, width=150)
 
-# Sidebar logo
-with st.sidebar:
-    st.image(logo, width=150)
-
-# Top‑centered header with logo next to the text
-col1, col2 = st.columns([1, 8])
+# 4. Use it in the main header
+col1, col2 = st.columns([1, 5])
 with col1:
-    st.image(logo, width=60)
+    st.image(logo_url, width=60)
 with col2:
-    st.title("My Professional Dashboard")
+    st.title("Professional SOP Generator")
 
-st.write("Your app content goes here …")
-with st.sidebar:
     st.title("How to use")
     st.info("""
     1. Enter a clear **Topic**.
