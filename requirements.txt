@@ -1,2 +1,5 @@
 streamlit
 google-generativeai
+streamlit
+google-generativeai
+fpdf2
