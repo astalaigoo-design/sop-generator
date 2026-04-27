@@ -28,16 +28,18 @@ def render_svg_data_uri(svg: str) -> str:
     return f"data:image/svg+xml;base64,{b64}"
 
 
-def create_pdf_bytes(text: str) -> bytes:
+def create_pdf_bytes(text):
     pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Helvetica", size=11)
+    pdf.set_font("Helvetica", size=12)
+    
+    # Clean the text
+    clean_text = text.encode('latin-1', 'ignore').decode('latin-1')
+    pdf.multi_cell(0, 10, txt=clean_text)
+    
+    # CHANGE THIS LINE:
+    return bytes(pdf.output()) 
 
-    clean_text = (text or "").encode("latin-1", "ignore").decode("latin-1")
-    pdf.multi_cell(0, 6, clean_text)
-
-    return pdf.output() 
 
 
 
