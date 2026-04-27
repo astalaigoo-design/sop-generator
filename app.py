@@ -37,7 +37,8 @@ def create_pdf_bytes(text: str) -> bytes:
     clean_text = (text or "").encode("latin-1", "ignore").decode("latin-1")
     pdf.multi_cell(0, 6, clean_text)
 
-    return pdf.output(dest="S").encode("latin-1")
+    return pdf.output() 
+
 
 
 def get_groq_api_key() -> str | None:
