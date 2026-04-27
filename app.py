@@ -77,8 +77,7 @@ with st.sidebar:
 
     st.markdown("### Settings")
     temperature = st.slider("Creativity level", 0.0, 1.0, 0.7, 0.05)
-    model = st.selectbox("Model", ["llama3-8b-8192", "llama3-70b-8192"], index=0)
-
+    model="llama-3.1-8b-instant"
 
 header_left, header_right = st.columns([1, 6])
 with header_left:
