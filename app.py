@@ -3,6 +3,7 @@ import os
 
 import streamlit as st
 import base64
+import json
 from io import BytesIO
 from fpdf import FPDF
 from groq import Groq
@@ -82,6 +83,26 @@ def get_groq_api_key() -> str | None:
     return os.getenv("GROQ_API_KEY") or None
 
 
+COMPANY_PROFILE_PATH = os.path.join(".streamlit", "company_profile.json")
+
+
+def load_company_profile() -> dict:
+    try:
+        if not os.path.exists(COMPANY_PROFILE_PATH):
+            return {}
+        with open(COMPANY_PROFILE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_company_profile(profile: dict) -> None:
+    os.makedirs(os.path.dirname(COMPANY_PROFILE_PATH), exist_ok=True)
+    with open(COMPANY_PROFILE_PATH, "w", encoding="utf-8") as f:
+        json.dump(profile, f, ensure_ascii=False, indent=2)
+
+
 TEMPLATE_GUIDANCE: dict[str, str] = {
     "IT SOP": """
 Focus on technical accuracy, security, and repeatability.
@@ -119,6 +140,7 @@ def build_prompt_for_template(
     tools_used: str,
     compliance_standard: str,
     strictness: str,
+    tone: str,
     include_definitions: bool,
     include_safety_compliance: bool,
     include_records: bool,
@@ -158,6 +180,7 @@ Use crisp headings and numbered steps. Keep it practical and immediately actiona
 Target audience: {audience}
 Tools/systems used: {tools_used or "Not specified"}
 Compliance standard(s): {compliance_standard or "Not specified"}
+Tone: {tone}
 {strictness_instructions}
 
 Required sections (include ONLY these; omit all others):
@@ -194,6 +217,15 @@ def generate_sop_cached(
 logo_url = render_svg_data_uri(SVG_CODE)
 
 with st.sidebar:
+    # Load profile once per session, then use it as widget defaults.
+    if "company_profile_loaded" not in st.session_state:
+        profile = load_company_profile()
+        st.session_state.company_profile_loaded = True
+        st.session_state.profile_audience = str(profile.get("audience", "") or "")
+        st.session_state.profile_tools_used = str(profile.get("tools_used", "") or "")
+        st.session_state.profile_compliance = str(profile.get("compliance_standard", "") or "")
+        st.session_state.profile_tone = str(profile.get("tone", "Professional") or "Professional")
+
     st.image(logo_url, width=160)
     st.markdown("### How to use")
     st.info(
@@ -202,6 +234,58 @@ with st.sidebar:
         "3. Click **Generate SOP**.\n"
         "4. Download as PDF if needed."
     )
+
+    st.markdown("### Company profile")
+    st.text_input(
+        "Default audience",
+        key="profile_audience",
+        placeholder="e.g., New hires, IT admins, Shift supervisors",
+    )
+    st.text_input(
+        "Default tools used",
+        key="profile_tools_used",
+        placeholder="e.g., Okta, Jira, Google Workspace, Forklifts, POS system",
+    )
+    st.selectbox(
+        "Default compliance",
+        ["", "ISO 27001", "SOC 2", "HIPAA"],
+        key="profile_compliance",
+        index=0,
+    )
+    st.selectbox(
+        "Default tone",
+        ["Professional", "Friendly", "Policy-like", "Concise"],
+        key="profile_tone",
+        index=0,
+    )
+
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        if st.button("Save profile"):
+            save_company_profile(
+                {
+                    "audience": st.session_state.profile_audience,
+                    "tools_used": st.session_state.profile_tools_used,
+                    "compliance_standard": st.session_state.profile_compliance,
+                    "tone": st.session_state.profile_tone,
+                }
+            )
+            st.success("Saved.")
+    with col_p2:
+        if st.button("Reset profile"):
+            st.session_state.profile_audience = ""
+            st.session_state.profile_tools_used = ""
+            st.session_state.profile_compliance = ""
+            st.session_state.profile_tone = "Professional"
+            save_company_profile(
+                {
+                    "audience": "",
+                    "tools_used": "",
+                    "compliance_standard": "",
+                    "tone": "Professional",
+                }
+            )
+            st.success("Reset.")
 
     st.markdown("### Settings")
     template_name = st.selectbox(
@@ -214,10 +298,12 @@ with st.sidebar:
 
     audience = st.text_input(
         "Audience (optional)",
+        value=st.session_state.profile_audience,
         placeholder="e.g., New hires, IT admins, Shift supervisors",
     )
     tools_used = st.text_input(
         "Tools used (optional)",
+        value=st.session_state.profile_tools_used,
         placeholder="e.g., Okta, Jira, Google Workspace, Forklifts, POS system",
     )
     compliance_standard = st.selectbox(
@@ -226,6 +312,13 @@ with st.sidebar:
         index=0,
     )
     compliance_standard = "" if compliance_standard == "None" else compliance_standard
+    tone = st.selectbox(
+        "Tone",
+        ["Professional", "Friendly", "Policy-like", "Concise"],
+        index=["Professional", "Friendly", "Policy-like", "Concise"].index(st.session_state.profile_tone)
+        if st.session_state.profile_tone in ["Professional", "Friendly", "Policy-like", "Concise"]
+        else 0,
+    )
 
     st.markdown("### Outline controls")
     include_definitions = st.checkbox("Include Definitions section", value=True)
@@ -270,6 +363,7 @@ if generate:
                     tools_used=tools_used.strip(),
                     compliance_standard=compliance_standard.strip(),
                     strictness=strictness,
+                    tone=tone,
                     include_definitions=include_definitions,
                     include_safety_compliance=include_safety_compliance,
                     include_records=include_records,
