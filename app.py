@@ -201,7 +201,6 @@ with header_right:
     st.title("Professional SOP Generator")
     st.caption("Powered by Groq")
 
-topic = st.text_input("SOP topic", placeholder="e.g., Data Security Protocol")
 notes = st.text_area("Input notes / raw text", height=220, placeholder="Paste your notes here...")
 
 api_key = get_groq_api_key()
@@ -211,14 +210,15 @@ if not api_key:
 generate = st.button("Generate SOP", type="primary", disabled=not api_key)
 
 if generate:
-    if not topic.strip():
-        st.error("Please enter an SOP topic.")
+    if not notes.strip():
+        st.error("Please paste your notes (or a transcript) first.")
     else:
         with st.spinner("Writing SOP..."):
             try:
+                inferred_topic = f"{template_name} SOP"
                 prompt = build_prompt_for_template(
                     template_name,
-                    topic,
+                    inferred_topic,
                     notes,
                     audience=audience.strip() or "General staff",
                     tools_used=tools_used.strip(),
@@ -240,7 +240,7 @@ if generate:
             st.markdown(sop_text)
 
             pdf_bytes = create_pdf_bytes(sop_text)
-            safe_name = "".join(c for c in topic.strip() if c.isalnum() or c in (" ", "-", "_")).strip() or "sop"
+            safe_name = "".join(c for c in inferred_topic.strip() if c.isalnum() or c in (" ", "-", "_")).strip() or "sop"
             st.download_button(
                 "Download PDF",
                 data=pdf_bytes,
