@@ -119,6 +119,10 @@ def build_prompt_for_template(
     tools_used: str,
     compliance_standard: str,
     strictness: str,
+    include_definitions: bool,
+    include_safety_compliance: bool,
+    include_records: bool,
+    include_checklist: bool,
 ) -> str:
     template_guidance = TEMPLATE_GUIDANCE.get(template_name, "")
 
@@ -129,6 +133,24 @@ def build_prompt_for_template(
         else "Strictness: DETAILED. Be thorough and explanatory while staying professional. "
         "Include tips, examples, and clarifying notes where helpful."
     )
+
+    section_lines = [
+        "- Purpose",
+        "- Scope",
+        "- Roles & responsibilities",
+        "- Procedure (numbered)",
+        "- Exceptions / edge cases",
+    ]
+    if include_definitions:
+        section_lines.append("- Definitions (only if needed)")
+    if include_records:
+        section_lines.append("- Records / documentation")
+    if include_safety_compliance:
+        section_lines.append("- Safety / compliance (if relevant)")
+    if include_checklist:
+        section_lines.append("- Checklist (short, at the end)")
+
+    sections_text = "\n".join(section_lines)
     return f"""
 Write a clear, professional Standard Operating Procedure (SOP) for the topic below.
 Use crisp headings and numbered steps. Keep it practical and immediately actionable.
@@ -138,16 +160,8 @@ Tools/systems used: {tools_used or "Not specified"}
 Compliance standard(s): {compliance_standard or "Not specified"}
 {strictness_instructions}
 
-Required sections:
-- Purpose
-- Scope
-- Definitions (only if needed)
-- Roles & responsibilities
-- Procedure (numbered)
-- Exceptions / edge cases
-- Records / documentation
-- Safety / compliance (if relevant)
-- Checklist (short, at the end)
+Required sections (include ONLY these; omit all others):
+{sections_text}
 
 Template-specific guidance:
 {template_guidance}
@@ -213,6 +227,12 @@ with st.sidebar:
     )
     compliance_standard = "" if compliance_standard == "None" else compliance_standard
 
+    st.markdown("### Outline controls")
+    include_definitions = st.checkbox("Include Definitions section", value=True)
+    include_safety_compliance = st.checkbox("Include Safety/Compliance section", value=True)
+    include_records = st.checkbox("Include Records/Documentation section", value=True)
+    include_checklist = st.checkbox("Include Checklist section", value=True)
+
     temperature = st.slider("Creativity level", 0.0, 1.0, 0.7, 0.05)
     model="llama-3.1-8b-instant"
 
@@ -250,6 +270,10 @@ if generate:
                     tools_used=tools_used.strip(),
                     compliance_standard=compliance_standard.strip(),
                     strictness=strictness,
+                    include_definitions=include_definitions,
+                    include_safety_compliance=include_safety_compliance,
+                    include_records=include_records,
+                    include_checklist=include_checklist,
                 )
                 sop_text = generate_sop_cached(
                     api_key=api_key,
