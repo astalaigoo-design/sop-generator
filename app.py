@@ -33,10 +33,14 @@ def create_pdf_bytes(text):
     pdf.set_font("Helvetica", size=12)
     
     # Clean the text
-    clean_text = text.encode('latin-1', 'ignore').decode('latin-1')
+    clean_text = (text or "").encode("latin-1", "ignore").decode("latin-1")
     pdf.multi_cell(0, 10, txt=clean_text)
     
-    return pdf.output(dest="S").encode("latin-1")
+    out = pdf.output(dest="S")
+    # fpdf (PyFPDF) may return `str`, while fpdf2 often returns `bytes`/`bytearray`.
+    if isinstance(out, str):
+        return out.encode("latin-1")
+    return bytes(out)
 
 
 
