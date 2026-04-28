@@ -1,8 +1,8 @@
 import os
-import base64
+
 
 import streamlit as st
-import base64
+
 from fpdf import FPDF
 from groq import Groq
 
@@ -27,7 +27,6 @@ def render_svg_data_uri(svg: str) -> str:
     b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
     return f"data:image/svg+xml;base64,{b64}"
 
-
 def create_pdf_bytes(text):
     pdf = FPDF()
     pdf.add_page()
@@ -37,8 +36,7 @@ def create_pdf_bytes(text):
     clean_text = text.encode('latin-1', 'ignore').decode('latin-1')
     pdf.multi_cell(0, 10, txt=clean_text)
     
-    # CHANGE THIS LINE:
-    return bytes(pdf.output()) 
+    return pdf.output(dest="S").encode("latin-1")
 
 
 
@@ -54,12 +52,53 @@ def get_groq_api_key() -> str | None:
     return os.getenv("GROQ_API_KEY") or None
 
 
-def build_prompt(topic: str, notes: str) -> str:
+TEMPLATE_GUIDANCE: dict[str, str] = {
+    "IT SOP": """
+Focus on technical accuracy, security, and repeatability.
+Include: Preconditions/requirements, access/permissions, tools/systems involved,
+rollback plan, troubleshooting, validation steps, logging/monitoring, and SLAs/owners.
+Add a short 'Change management' section (impact, approvals, maintenance window).
+""".strip(),
+    "HR SOP": """
+Focus on compliance, privacy, fairness, and a clear human workflow.
+Include: Trigger events, required forms/documents, approvals, timelines/SLAs,
+confidentiality/data handling, escalation paths, templates/communications, and record retention.
+Add a short 'Candidate/employee communication' checklist.
+""".strip(),
+    "Warehouse SOP": """
+Focus on safety, efficiency, and physical process clarity.
+Include: PPE/safety requirements, equipment/tools, location/bin labeling, scanning steps,
+quality checks, exception handling (damages/shortages), and end-of-shift reconciliation.
+Add a short 'Safety checks' section and 'Common errors to avoid'.
+""".strip(),
+    "Restaurant SOP": """
+Focus on food safety, service consistency, and speed.
+Include: food safety controls (temps, cross-contamination), prep/line setup,
+service steps, cleaning schedules, allergen handling, customer escalation, and close-down tasks.
+Add checklists for opening/shift/closing and 'Quality standards' (taste, plating, timing).
+""".strip(),
+}
+
+
+def build_prompt_for_template(template_name: str, topic: str, notes: str) -> str:
+    template_guidance = TEMPLATE_GUIDANCE.get(template_name, "")
     return f"""
 Write a clear, professional Standard Operating Procedure (SOP) for the topic below.
-Use headings and numbered steps. Include: Purpose, Scope, Definitions (if needed),
-Responsibilities, Procedure, Records/Documentation, Safety/Compliance (if relevant),
-and a short checklist at the end.
+Use crisp headings and numbered steps. Keep it practical and immediately actionable.
+
+Required sections:
+- Purpose
+- Scope
+- Definitions (only if needed)
+- Roles & responsibilities
+- Procedure (numbered)
+- Exceptions / edge cases
+- Records / documentation
+- Safety / compliance (if relevant)
+- Checklist (short, at the end)
+
+Template-specific guidance:
+{template_guidance}
 
 Topic: {topic}
 Notes / raw input (may be messy): {notes}
@@ -79,8 +118,14 @@ with st.sidebar:
     )
 
     st.markdown("### Settings")
+    template_name = st.selectbox(
+        "Template",
+        ["IT SOP", "HR SOP", "Warehouse SOP", "Restaurant SOP"],
+        index=0,
+    )
     temperature = st.slider("Creativity level", 0.0, 1.0, 0.7, 0.05)
     model="llama-3.1-8b-instant"
+
 
 header_left, header_right = st.columns([1, 6])
 with header_left:
@@ -109,7 +154,7 @@ if generate:
                     model=model,
                     messages=[
                         {"role": "system", "content": "You are a professional technical writer."},
-                        {"role": "user", "content": build_prompt(topic, notes)},
+                        {"role": "user", "content": build_prompt_for_template(template_name, topic, notes)},
                     ],
                     temperature=float(temperature),
                 )
