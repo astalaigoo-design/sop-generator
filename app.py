@@ -2,7 +2,7 @@ import os
 
 
 import streamlit as st
-
+import base64
 from fpdf import FPDF
 from groq import Groq
 
