@@ -127,6 +127,26 @@ Notes / raw input (may be messy): {notes}
 """.strip()
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def generate_sop_cached(
+    *,
+    api_key: str,
+    model: str,
+    temperature: float,
+    prompt: str,
+) -> str:
+    client = Groq(api_key=api_key)
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a professional technical writer."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=float(temperature),
+    )
+    return completion.choices[0].message.content or ""
+
+
 logo_url = render_svg_data_uri(SVG_CODE)
 
 with st.sidebar:
@@ -166,6 +186,9 @@ with st.sidebar:
     temperature = st.slider("Creativity level", 0.0, 1.0, 0.7, 0.05)
     model="llama-3.1-8b-instant"
 
+    if st.button("Clear cached results"):
+        st.cache_data.clear()
+
 
 header_left, header_right = st.columns([1, 6])
 with header_left:
@@ -187,29 +210,23 @@ if generate:
     if not topic.strip():
         st.error("Please enter an SOP topic.")
     else:
-        client = Groq(api_key=api_key)
         with st.spinner("Writing SOP..."):
             try:
-                completion = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "You are a professional technical writer."},
-                        {
-                            "role": "user",
-                            "content": build_prompt_for_template(
-                                template_name,
-                                topic,
-                                notes,
-                                audience=audience.strip() or "General staff",
-                                tools_used=tools_used.strip(),
-                                compliance_standard=compliance_standard.strip(),
-                                strictness=strictness,
-                            ),
-                        },
-                    ],
-                    temperature=float(temperature),
+                prompt = build_prompt_for_template(
+                    template_name,
+                    topic,
+                    notes,
+                    audience=audience.strip() or "General staff",
+                    tools_used=tools_used.strip(),
+                    compliance_standard=compliance_standard.strip(),
+                    strictness=strictness,
                 )
-                sop_text = completion.choices[0].message.content or ""
+                sop_text = generate_sop_cached(
+                    api_key=api_key,
+                    model=model,
+                    temperature=float(temperature),
+                    prompt=prompt,
+                )
             except Exception as e:
                 st.error(f"Generation failed: {e}")
                 sop_text = ""
