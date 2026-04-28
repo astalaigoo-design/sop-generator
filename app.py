@@ -3,8 +3,10 @@ import os
 
 import streamlit as st
 import base64
+from io import BytesIO
 from fpdf import FPDF
 from groq import Groq
+from docx import Document
 
 
 st.set_page_config(page_title="AI SOP Generator", layout="wide")
@@ -41,6 +43,30 @@ def create_pdf_bytes(text):
     if isinstance(out, str):
         return out.encode("latin-1")
     return bytes(out)
+
+
+def create_docx_bytes(title: str, text: str) -> bytes:
+    doc = Document()
+    if title.strip():
+        doc.add_heading(title.strip(), level=1)
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+
+        if line.startswith("### "):
+            doc.add_heading(line[4:].strip(), level=3)
+        elif line.startswith("## "):
+            doc.add_heading(line[3:].strip(), level=2)
+        elif line.startswith("# "):
+            doc.add_heading(line[2:].strip(), level=1)
+        else:
+            doc.add_paragraph(line)
+
+    buff = BytesIO()
+    doc.save(buff)
+    return buff.getvalue()
 
 
 
@@ -241,9 +267,20 @@ if generate:
 
             pdf_bytes = create_pdf_bytes(sop_text)
             safe_name = "".join(c for c in inferred_topic.strip() if c.isalnum() or c in (" ", "-", "_")).strip() or "sop"
-            st.download_button(
-                "Download PDF",
-                data=pdf_bytes,
-                file_name=f"{safe_name}.pdf",
-                mime="application/pdf",
-            )
+            docx_bytes = create_docx_bytes(safe_name, sop_text)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_bytes,
+                    file_name=f"{safe_name}.pdf",
+                    mime="application/pdf",
+                )
+            with col_b:
+                st.download_button(
+                    "Download DOCX",
+                    data=docx_bytes,
+                    file_name=f"{safe_name}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
