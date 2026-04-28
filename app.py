@@ -173,6 +173,15 @@ def build_prompt_for_template(
         section_lines.append("- Checklist (short, at the end)")
 
     sections_text = "\n".join(section_lines)
+
+    notes_based_section = ""
+    if len((notes or "").strip()) >= 1200:
+        notes_based_section = """
+Add a short section near the top titled exactly: "Based on notes:"
+- 5–10 bullet points capturing the most important concrete facts from the notes (tools, roles, constraints, risks, timelines).
+- Each bullet should reference the notes by quoting a short phrase in double-quotes OR by citing a specific detail (names/titles are ok; avoid secrets).
+- Do NOT invent details that are not present in the notes. If something is missing, say "Not specified in notes".
+""".strip()
     return f"""
 Write a clear, professional Standard Operating Procedure (SOP) for the topic below.
 Use crisp headings and numbered steps. Keep it practical and immediately actionable.
@@ -182,6 +191,8 @@ Tools/systems used: {tools_used or "Not specified"}
 Compliance standard(s): {compliance_standard or "Not specified"}
 Tone: {tone}
 {strictness_instructions}
+
+{notes_based_section}
 
 Required sections (include ONLY these; omit all others):
 {sections_text}
@@ -234,6 +245,7 @@ Goals:
 - Ensure steps are testable/verifyable and ordered logically.
 - Ensure compliance language is appropriate for: {compliance_standard or "Not specified"} (if any).
 - Keep the same overall intent, but rewrite as a corrected, improved SOP.
+- If there is a "Based on notes:" section, keep it and correct it to match the SOP (do not add new facts).
 
 Output rules:
 - Return ONLY the revised SOP (no analysis, no bullet list of issues).
