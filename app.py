@@ -80,11 +80,33 @@ Add checklists for opening/shift/closing and 'Quality standards' (taste, plating
 }
 
 
-def build_prompt_for_template(template_name: str, topic: str, notes: str) -> str:
+def build_prompt_for_template(
+    template_name: str,
+    topic: str,
+    notes: str,
+    *,
+    audience: str,
+    tools_used: str,
+    compliance_standard: str,
+    strictness: str,
+) -> str:
     template_guidance = TEMPLATE_GUIDANCE.get(template_name, "")
+
+    strictness_instructions = (
+        "Strictness: STRICT. Use a formal, policy-like tone. Use short, unambiguous steps. "
+        "Avoid fluff. Prefer MUST/SHALL where appropriate. Include clear acceptance/verification criteria."
+        if strictness == "Strict"
+        else "Strictness: DETAILED. Be thorough and explanatory while staying professional. "
+        "Include tips, examples, and clarifying notes where helpful."
+    )
     return f"""
 Write a clear, professional Standard Operating Procedure (SOP) for the topic below.
 Use crisp headings and numbered steps. Keep it practical and immediately actionable.
+
+Target audience: {audience}
+Tools/systems used: {tools_used or "Not specified"}
+Compliance standard(s): {compliance_standard or "Not specified"}
+{strictness_instructions}
 
 Required sections:
 - Purpose
@@ -123,6 +145,24 @@ with st.sidebar:
         ["IT SOP", "HR SOP", "Warehouse SOP", "Restaurant SOP"],
         index=0,
     )
+
+    strictness = st.radio("Strictness", ["Strict", "Detailed"], index=1, horizontal=True)
+
+    audience = st.text_input(
+        "Audience (optional)",
+        placeholder="e.g., New hires, IT admins, Shift supervisors",
+    )
+    tools_used = st.text_input(
+        "Tools used (optional)",
+        placeholder="e.g., Okta, Jira, Google Workspace, Forklifts, POS system",
+    )
+    compliance_standard = st.selectbox(
+        "Compliance standard (optional)",
+        ["None", "ISO 27001", "SOC 2", "HIPAA"],
+        index=0,
+    )
+    compliance_standard = "" if compliance_standard == "None" else compliance_standard
+
     temperature = st.slider("Creativity level", 0.0, 1.0, 0.7, 0.05)
     model="llama-3.1-8b-instant"
 
@@ -154,7 +194,18 @@ if generate:
                     model=model,
                     messages=[
                         {"role": "system", "content": "You are a professional technical writer."},
-                        {"role": "user", "content": build_prompt_for_template(template_name, topic, notes)},
+                        {
+                            "role": "user",
+                            "content": build_prompt_for_template(
+                                template_name,
+                                topic,
+                                notes,
+                                audience=audience.strip() or "General staff",
+                                tools_used=tools_used.strip(),
+                                compliance_standard=compliance_standard.strip(),
+                                strictness=strictness,
+                            ),
+                        },
                     ],
                     temperature=float(temperature),
                 )
