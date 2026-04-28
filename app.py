@@ -214,6 +214,47 @@ def generate_sop_cached(
     return completion.choices[0].message.content or ""
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def review_and_fix_sop_cached(
+    *,
+    api_key: str,
+    model: str,
+    temperature: float,
+    sop_text: str,
+    strictness: str,
+    tone: str,
+    compliance_standard: str,
+) -> str:
+    client = Groq(api_key=api_key)
+    prompt = f"""
+You are reviewing an SOP for quality and completeness.
+
+Goals:
+- Find and fix gaps, unclear steps, missing roles/responsibilities, and missing records/documentation.
+- Ensure steps are testable/verifyable and ordered logically.
+- Ensure compliance language is appropriate for: {compliance_standard or "Not specified"} (if any).
+- Keep the same overall intent, but rewrite as a corrected, improved SOP.
+
+Output rules:
+- Return ONLY the revised SOP (no analysis, no bullet list of issues).
+- Use the same tone: {tone}
+- Use strictness: {strictness}
+
+SOP to review:
+{sop_text}
+""".strip()
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a meticulous SOP editor and auditor."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=float(temperature),
+    )
+    return completion.choices[0].message.content or ""
+
+
 logo_url = render_svg_data_uri(SVG_CODE)
 
 with st.sidebar:
@@ -375,6 +416,8 @@ if generate:
                     temperature=float(temperature),
                     prompt=prompt,
                 )
+                st.session_state.last_sop_text = sop_text
+                st.session_state.last_inferred_topic = inferred_topic
             except Exception as e:
                 st.error(f"Generation failed: {e}")
                 sop_text = ""
@@ -402,3 +445,57 @@ if generate:
                     file_name=f"{safe_name}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
+
+
+# --- Step 2: Quality pass (Review & Fix) ---
+last_sop = st.session_state.get("last_sop_text", "")
+if api_key and last_sop:
+    st.divider()
+    st.subheader("Review & Fix SOP (Quality pass)")
+    st.caption("Runs an editor pass to fix gaps, unclear steps, and missing roles/records.")
+
+    do_review = st.button("Review & Fix SOP", type="secondary")
+    if do_review:
+        with st.spinner("Reviewing and improving SOP..."):
+            try:
+                fixed = review_and_fix_sop_cached(
+                    api_key=api_key,
+                    model=model,
+                    temperature=min(float(temperature), 0.4),
+                    sop_text=last_sop,
+                    strictness=strictness,
+                    tone=tone,
+                    compliance_standard=compliance_standard.strip(),
+                )
+                st.session_state.last_fixed_sop_text = fixed
+            except Exception as e:
+                st.error(f"Review failed: {e}")
+
+    fixed_sop = st.session_state.get("last_fixed_sop_text", "")
+    if fixed_sop:
+        st.subheader("Revised SOP")
+        st.markdown(fixed_sop)
+
+        inferred_topic = st.session_state.get("last_inferred_topic", "SOP")
+        safe_name = (
+            "".join(c for c in str(inferred_topic).strip() if c.isalnum() or c in (" ", "-", "_")).strip()
+            or "sop"
+        )
+        pdf_bytes = create_pdf_bytes(fixed_sop)
+        docx_bytes = create_docx_bytes(safe_name, fixed_sop)
+
+        col_c, col_d = st.columns(2)
+        with col_c:
+            st.download_button(
+                "Download Revised PDF",
+                data=pdf_bytes,
+                file_name=f"{safe_name}-revised.pdf",
+                mime="application/pdf",
+            )
+        with col_d:
+            st.download_button(
+                "Download Revised DOCX",
+                data=docx_bytes,
+                file_name=f"{safe_name}-revised.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
