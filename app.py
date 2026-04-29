@@ -197,6 +197,10 @@ def save_company_profile(profile: dict) -> None:
         json.dump(profile, f, ensure_ascii=False, indent=2)
 
 
+def show_busy_error() -> None:
+    st.error("The system is busy. Please try again in a few seconds.")
+
+
 def append_feedback(entry: dict) -> None:
     os.makedirs(os.path.dirname(FEEDBACK_PATH), exist_ok=True)
     with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
@@ -857,10 +861,9 @@ with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
                 st.success("Transcription complete. The Notes box below was filled.")
             else:
                 st.error("Transcription returned empty text.")
-        except Exception as e:
-            st.error(f"Transcription failed: {e}")
-
-with st.expander("Vision (Image Analysis)", expanded=False):
+        except Exception:
+            show_busy_error()
+affith st.expander("Vision (Image Analysis)", expanded=False):
     st.caption("Upload an image (photo/screenshot). We'll extract structured notes and fill the Notes box.")
     image_file = st.file_uploader(
         "Upload image",
@@ -897,8 +900,8 @@ with st.expander("Vision (Image Analysis)", expanded=False):
                 st.success("Image analysis complete. The Notes box below was filled.")
             else:
                 st.error("Image analysis returned empty text.")
-        except Exception as e:
-            st.error(f"Image analysis failed: {e}")
+        except Exception:
+            show_busy_error()
 
 notes = st.text_area(
     "Input notes / raw text",
@@ -964,7 +967,7 @@ if generate:
                     }
                 )
             except Exception as e:
-                st.error(f"Generation failed: {e}")
+                show_busy_error()
                 sop_text = ""
 
         if sop_text:
@@ -993,26 +996,32 @@ if generate:
                         st.success("Reset to the generated SOP.")
 
             sop_for_download = st.session_state.get("current_sop_text") or sop_text
-            pdf_bytes = create_pdf_bytes(sop_text)
             safe_name = "".join(c for c in inferred_topic.strip() if c.isalnum() or c in (" ", "-", "_")).strip() or "sop"
-            pdf_bytes = create_pdf_bytes(sop_for_download)
-            docx_bytes = create_docx_bytes(safe_name, sop_for_download)
+            try:
+                pdf_bytes = create_pdf_bytes(sop_for_download)
+                docx_bytes = create_docx_bytes(safe_name, sop_for_download)
+            except Exception:
+                pdf_bytes = b""
+                docx_bytes = b""
+                show_busy_error()
 
             col_a, col_b = st.columns(2)
             with col_a:
-                st.download_button(
-                    "Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"{safe_name}.pdf",
-                    mime="application/pdf",
-                )
+                if pdf_bytes:
+                    st.download_button(
+                        "Download PDF",
+                        data=pdf_bytes,
+                        file_name=f"{safe_name}.pdf",
+                        mime="application/pdf",
+                    )
             with col_b:
-                st.download_button(
-                    "Download DOCX",
-                    data=docx_bytes,
-                    file_name=f"{safe_name}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
+                if docx_bytes:
+                    st.download_button(
+                        "Download DOCX",
+                        data=docx_bytes,
+                        file_name=f"{safe_name}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
 
             st.markdown("### Rate this SOP")
             rating = st.radio(
@@ -1087,7 +1096,7 @@ if api_key and last_sop:
                     }
                 )
             except Exception as e:
-                st.error(f"Review failed: {e}")
+                show_busy_error()
 
     fixed_sop = st.session_state.get("last_fixed_sop_text", "")
     if fixed_sop:
@@ -1122,24 +1131,31 @@ if api_key and last_sop:
                     st.success("Reset to the revised SOP.")
 
         sop_for_download = st.session_state.get("current_sop_text") or fixed_sop
-        pdf_bytes = create_pdf_bytes(sop_for_download)
-        docx_bytes = create_docx_bytes(safe_name, sop_for_download)
+        try:
+            pdf_bytes = create_pdf_bytes(sop_for_download)
+            docx_bytes = create_docx_bytes(safe_name, sop_for_download)
+        except Exception:
+            pdf_bytes = b""
+            docx_bytes = b""
+            show_busy_error()
 
         col_c, col_d = st.columns(2)
         with col_c:
-            st.download_button(
-                "Download Revised PDF",
-                data=pdf_bytes,
-                file_name=f"{safe_name}-revised.pdf",
-                mime="application/pdf",
-            )
+            if pdf_bytes:
+                st.download_button(
+                    "Download Revised PDF",
+                    data=pdf_bytes,
+                    file_name=f"{safe_name}-revised.pdf",
+                    mime="application/pdf",
+                )
         with col_d:
-            st.download_button(
-                "Download Revised DOCX",
-                data=docx_bytes,
-                file_name=f"{safe_name}-revised.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
+            if docx_bytes:
+                st.download_button(
+                    "Download Revised DOCX",
+                    data=docx_bytes,
+                    file_name=f"{safe_name}-revised.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
 
         st.markdown("### Rate the revised SOP")
         rating2 = st.radio(
@@ -1205,7 +1221,7 @@ if api_key and candidate_sop_for_audit:
                 )
                 st.session_state.last_audit_text = audit
             except Exception as e:
-                st.error(f"Audit failed: {e}")
+                show_busy_error()
 
     audit_text = st.session_state.get("last_audit_text", "")
     if audit_text:
@@ -1231,7 +1247,7 @@ if api_key and candidate_sop_for_flowchart:
                 )
                 st.session_state.last_mermaid_flowchart = mermaid_code
             except Exception as e:
-                st.error(f"Flowchart generation failed: {e}")
+                show_busy_error()
 
     mermaid_code = st.session_state.get("last_mermaid_flowchart", "")
     if mermaid_code:
