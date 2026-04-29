@@ -834,9 +834,32 @@ if generate:
             st.subheader("Generated SOP")
             st.markdown(sop_text)
 
+            if "current_sop_text" not in st.session_state:
+                st.session_state.current_sop_text = sop_text
+
+            with st.expander("Interactive Step Editor (edit inside the app)", expanded=False):
+                st.caption("Edit the SOP here, then download the edited version.")
+                edited = st.text_area(
+                    "Edit SOP text",
+                    value=st.session_state.current_sop_text,
+                    height=320,
+                    key=f"editor_gen_{sop_fingerprint(sop_text)}",
+                )
+                col_e1, col_e2 = st.columns(2)
+                with col_e1:
+                    if st.button("Save edits", key=f"save_gen_{sop_fingerprint(sop_text)}"):
+                        st.session_state.current_sop_text = edited
+                        st.success("Edits saved. Downloads will use the edited SOP.")
+                with col_e2:
+                    if st.button("Reset to generated", key=f"reset_gen_{sop_fingerprint(sop_text)}"):
+                        st.session_state.current_sop_text = sop_text
+                        st.success("Reset to the generated SOP.")
+
+            sop_for_download = st.session_state.get("current_sop_text") or sop_text
             pdf_bytes = create_pdf_bytes(sop_text)
             safe_name = "".join(c for c in inferred_topic.strip() if c.isalnum() or c in (" ", "-", "_")).strip() or "sop"
-            docx_bytes = create_docx_bytes(safe_name, sop_text)
+            pdf_bytes = create_pdf_bytes(sop_for_download)
+            docx_bytes = create_docx_bytes(safe_name, sop_for_download)
 
             col_a, col_b = st.columns(2)
             with col_a:
@@ -922,13 +945,36 @@ if api_key and last_sop:
         st.subheader("Revised SOP")
         st.markdown(fixed_sop)
 
+        # Make revised SOP the current editable SOP by default.
+        st.session_state.current_sop_text = fixed_sop
+
         inferred_topic = st.session_state.get("last_inferred_topic", "SOP")
         safe_name = (
             "".join(c for c in str(inferred_topic).strip() if c.isalnum() or c in (" ", "-", "_")).strip()
             or "sop"
         )
-        pdf_bytes = create_pdf_bytes(fixed_sop)
-        docx_bytes = create_docx_bytes(safe_name, fixed_sop)
+
+        with st.expander("Interactive Step Editor (edit revised SOP)", expanded=False):
+            st.caption("Edit the revised SOP here, then download the edited version.")
+            edited_rev = st.text_area(
+                "Edit revised SOP text",
+                value=st.session_state.current_sop_text,
+                height=320,
+                key=f"editor_rev_{sop_fingerprint(fixed_sop)}",
+            )
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                if st.button("Save revised edits", key=f"save_rev_{sop_fingerprint(fixed_sop)}"):
+                    st.session_state.current_sop_text = edited_rev
+                    st.success("Edits saved. Revised downloads will use the edited SOP.")
+            with col_r2:
+                if st.button("Reset to revised", key=f"reset_rev_{sop_fingerprint(fixed_sop)}"):
+                    st.session_state.current_sop_text = fixed_sop
+                    st.success("Reset to the revised SOP.")
+
+        sop_for_download = st.session_state.get("current_sop_text") or fixed_sop
+        pdf_bytes = create_pdf_bytes(sop_for_download)
+        docx_bytes = create_docx_bytes(safe_name, sop_for_download)
 
         col_c, col_d = st.columns(2)
         with col_c:
