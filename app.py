@@ -6,6 +6,7 @@ import base64
 import json
 from io import BytesIO
 import streamlit.components.v1 as components
+import hashlib
 from fpdf import FPDF
 from groq import Groq
 from docx import Document
@@ -326,6 +327,28 @@ def render_mermaid(mermaid_code: str, *, height_px: int = 700) -> None:
     components.html(html, height=height_px, scrolling=True)
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def transcribe_audio_cached(
+    *,
+    api_key: str,
+    model: str,
+    file_name: str,
+    file_sha256: str,
+    audio_bytes: bytes,
+    language: str,
+) -> str:
+    client = Groq(api_key=api_key)
+    transcription = client.audio.transcriptions.create(
+        file=(file_name, audio_bytes),
+        model=model,
+        response_format="json",
+        language=language or None,
+        temperature=0.0,
+    )
+    # Groq SDK returns an object with .text
+    return (getattr(transcription, "text", None) or "").strip()
+
+
 logo_url = render_svg_data_uri(SVG_CODE)
 
 with st.sidebar:
@@ -452,11 +475,54 @@ with header_right:
     st.title("Professional SOP Generator")
     st.caption("Powered by Groq")
 
-notes = st.text_area("Input notes / raw text", height=220, placeholder="Paste your notes here...")
+if "notes" not in st.session_state:
+    st.session_state.notes = ""
 
 api_key = get_groq_api_key()
 if not api_key:
     st.warning("Set `GROQ_API_KEY` in Streamlit secrets or as an environment variable to generate SOPs.")
+
+with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
+    st.caption("Upload an audio file, transcribe it, then generate the SOP from the transcript.")
+    audio_file = st.file_uploader(
+        "Upload audio",
+        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "webm"],
+        accept_multiple_files=False,
+    )
+    stt_model = st.selectbox(
+        "Speech-to-text model",
+        ["whisper-large-v3-turbo", "whisper-large-v3"],
+        index=0,
+    )
+    stt_language = st.text_input("Language (optional, ISO-639-1)", value="", placeholder="e.g., en")
+
+    if st.button("Transcribe audio", disabled=(not api_key or audio_file is None)):
+        try:
+            audio_bytes = audio_file.getvalue()
+            file_sha = hashlib.sha256(audio_bytes).hexdigest()
+            with st.spinner("Transcribing..."):
+                transcript = transcribe_audio_cached(
+                    api_key=api_key,
+                    model=stt_model,
+                    file_name=audio_file.name,
+                    file_sha256=file_sha,
+                    audio_bytes=audio_bytes,
+                    language=stt_language.strip(),
+                )
+            if transcript:
+                st.session_state.notes = transcript
+                st.success("Transcription complete. The Notes box below was filled.")
+            else:
+                st.error("Transcription returned empty text.")
+        except Exception as e:
+            st.error(f"Transcription failed: {e}")
+
+notes = st.text_area(
+    "Input notes / raw text",
+    key="notes",
+    height=220,
+    placeholder="Paste your notes here (or use Voice Mode to transcribe audio).",
+)
 
 generate = st.button("Generate SOP", type="primary", disabled=not api_key)
 
