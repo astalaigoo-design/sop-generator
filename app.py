@@ -887,7 +887,8 @@ with st.sidebar:
     include_records = st.checkbox("Include Records/Documentation section", value=True)
     include_checklist = st.checkbox("Include Checklist section", value=True)
 
-    temperature = st.slider("Creativity level", 0.0, 1.0, 0.7, 0.05)
+    # Fixed temperature for stable outputs (removed "Creativity level" control)
+    temperature = 0.35
     model="llama-3.1-8b-instant"
 
     if st.button("Clear cached results"):
