@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from fpdf import FPDF
 from groq import Groq
 from docx import Document
+from pypdf import PdfReader
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 st.set_page_config(page_title="AI SOP Generator", layout="wide")
@@ -76,6 +79,88 @@ def create_docx_bytes(title: str, text: str) -> bytes:
 def sop_fingerprint(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
+
+def _chunk_text(text: str, *, chunk_chars: int = 900, overlap_chars: int = 150) -> list[str]:
+    t = (text or "").strip()
+    if not t:
+        return []
+    chunks: list[str] = []
+    i = 0
+    while i < len(t):
+        end = min(len(t), i + chunk_chars)
+        chunk = t[i:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(t):
+            break
+        i = max(0, end - overlap_chars)
+    return chunks
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=128)
+def extract_pdf_text_cached(*, file_sha256: str, pdf_bytes: bytes) -> str:
+    # file_sha256 is part of the cache key; pdf_bytes is the payload.
+    reader = PdfReader(BytesIO(pdf_bytes))
+    parts: list[str] = []
+    for page in reader.pages:
+        try:
+            parts.append(page.extract_text() or "")
+        except Exception:
+            parts.append("")
+    return "\n".join(parts).strip()
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
+def build_rag_index_cached(*, corpus_sha256: str, chunks: list[str]) -> dict:
+    # Store vectorizer vocabulary + matrix; st.cache_data will pickle it.
+    vectorizer = TfidfVectorizer(stop_words="english", max_features=5000)
+    matrix = vectorizer.fit_transform(chunks) if chunks else None
+    return {"vectorizer": vectorizer, "matrix": matrix}
+
+
+def retrieve_company_snippets(
+    *,
+    query: str,
+    docs: list[dict],
+    top_k: int = 6,
+) -> list[dict]:
+    # docs: [{name, chunks:[...]}]
+    all_chunks: list[str] = []
+    meta: list[dict] = []
+    for d in docs:
+        name = d.get("name", "manual.pdf")
+        for idx, ch in enumerate(d.get("chunks", []) or []):
+            all_chunks.append(ch)
+            meta.append({"doc": name, "chunk_index": idx, "text": ch})
+
+    if not all_chunks or not query.strip():
+        return []
+
+    corpus_sha = hashlib.sha256(("\n".join(all_chunks)).encode("utf-8")).hexdigest()
+    index = build_rag_index_cached(corpus_sha256=corpus_sha, chunks=all_chunks)
+    vectorizer: TfidfVectorizer = index["vectorizer"]
+    matrix = index["matrix"]
+    if matrix is None:
+        return []
+
+    qv = vectorizer.transform([query])
+    sims = cosine_similarity(qv, matrix)[0]
+    ranked = sorted(range(len(sims)), key=lambda i: sims[i], reverse=True)[:top_k]
+
+    results: list[dict] = []
+    for i in ranked:
+        if sims[i] <= 0:
+            continue
+        m = meta[i]
+        results.append(
+            {
+                "doc": m["doc"],
+                "chunk_index": m["chunk_index"],
+                "score": float(sims[i]),
+                "text": m["text"],
+            }
+        )
+    return results
 
 
 
@@ -232,6 +317,15 @@ Add a short section near the top titled exactly: "Based on notes:"
 - Each bullet should reference the notes by quoting a short phrase in double-quotes OR by citing a specific detail (names/titles are ok; avoid secrets).
 - Do NOT invent details that are not present in the notes. If something is missing, say "Not specified in notes".
 """.strip()
+    company_rules = st.session_state.get("company_rules_context", "").strip()
+    company_rules_block = ""
+    if company_rules:
+        company_rules_block = f"""
+Company rules (from uploaded manuals) — FOLLOW THESE STRICTLY:
+{company_rules}
+If any manual rule conflicts with the user's notes, call out the conflict and choose the safer/compliant path.
+""".strip()
+
     return f"""
 Write a clear, professional Standard Operating Procedure (SOP) for the topic below.
 Use crisp headings and numbered steps. Keep it practical and immediately actionable.
@@ -243,6 +337,8 @@ Tone: {tone}
 {strictness_instructions}
 
 {feedback_avoid}
+
+{company_rules_block}
 
 {notes_based_section}
 
@@ -515,6 +611,34 @@ with st.sidebar:
             )
             st.success("Reset.")
 
+    st.markdown("### Company Brain (RAG Lite)")
+    manuals = st.file_uploader(
+        "Upload PDF manuals (optional)",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Examples: Employee Handbook, Safety Guidelines, IT policy. These will be used as strict rules for SOPs.",
+    )
+    rag_top_k = st.slider("Manual snippets to use", 2, 10, 6, 1)
+
+    if "company_manual_docs" not in st.session_state:
+        st.session_state.company_manual_docs = []
+
+    if manuals:
+        docs: list[dict] = []
+        for f in manuals:
+            try:
+                pdf_bytes = f.getvalue()
+                sha = hashlib.sha256(pdf_bytes).hexdigest()
+                text = extract_pdf_text_cached(file_sha256=sha, pdf_bytes=pdf_bytes)
+                chunks = _chunk_text(text, chunk_chars=900, overlap_chars=150)
+                docs.append({"name": f.name, "sha256": sha, "chunks": chunks})
+            except Exception:
+                continue
+        st.session_state.company_manual_docs = docs
+        st.write(f"Loaded manuals: {len(docs)}")
+    else:
+        st.caption("No manuals uploaded.")
+
     st.markdown("### Settings")
     template_name = st.selectbox(
         "Template",
@@ -666,6 +790,20 @@ if generate:
         with st.spinner("Writing SOP..."):
             try:
                 inferred_topic = f"{template_name} SOP"
+                # Build company brain context for this generation (stored in session_state).
+                company_docs = st.session_state.get("company_manual_docs", []) or []
+                st.session_state.company_rules_context = ""
+                if company_docs:
+                    query = f"{template_name}\n{inferred_topic}\n{audience}\n{tools_used}\n{compliance_standard}\n{notes}"
+                    snippets = retrieve_company_snippets(query=query, docs=company_docs, top_k=int(rag_top_k))
+                    if snippets:
+                        ctx_lines = []
+                        for s in snippets:
+                            ctx_lines.append(
+                                f"- ({s['doc']} #chunk{s['chunk_index']}) {s['text']}"
+                            )
+                        st.session_state.company_rules_context = "\n".join(ctx_lines)
+
                 prompt = build_prompt_for_template(
                     template_name,
                     inferred_topic,
