@@ -863,7 +863,7 @@ with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
                 st.error("Transcription returned empty text.")
         except Exception:
             show_busy_error()
-affith st.expander("Vision (Image Analysis)", expanded=False):
+with st.expander("Vision (Image Analysis)", expanded=False):
     st.caption("Upload an image (photo/screenshot). We'll extract structured notes and fill the Notes box.")
     image_file = st.file_uploader(
         "Upload image",
