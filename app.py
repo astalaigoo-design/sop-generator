@@ -7,6 +7,7 @@ import json
 from io import BytesIO
 import streamlit.components.v1 as components
 import hashlib
+from datetime import datetime, timezone
 from fpdf import FPDF
 from groq import Groq
 from docx import Document
@@ -72,6 +73,10 @@ def create_docx_bytes(title: str, text: str) -> bytes:
     return buff.getvalue()
 
 
+def sop_fingerprint(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
 
 
 def get_groq_api_key() -> str | None:
@@ -86,6 +91,7 @@ def get_groq_api_key() -> str | None:
 
 
 COMPANY_PROFILE_PATH = os.path.join(".streamlit", "company_profile.json")
+FEEDBACK_PATH = os.path.join(".streamlit", "feedback.jsonl")
 
 
 def load_company_profile() -> dict:
@@ -103,6 +109,34 @@ def save_company_profile(profile: dict) -> None:
     os.makedirs(os.path.dirname(COMPANY_PROFILE_PATH), exist_ok=True)
     with open(COMPANY_PROFILE_PATH, "w", encoding="utf-8") as f:
         json.dump(profile, f, ensure_ascii=False, indent=2)
+
+
+def append_feedback(entry: dict) -> None:
+    os.makedirs(os.path.dirname(FEEDBACK_PATH), exist_ok=True)
+    with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def load_recent_feedback(limit: int = 50) -> list[dict]:
+    try:
+        if not os.path.exists(FEEDBACK_PATH):
+            return []
+        with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        out: list[dict] = []
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    out.append(obj)
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
 
 
 TEMPLATE_GUIDANCE: dict[str, str] = {
@@ -149,6 +183,20 @@ def build_prompt_for_template(
     include_checklist: bool,
 ) -> str:
     template_guidance = TEMPLATE_GUIDANCE.get(template_name, "")
+    feedback_items = load_recent_feedback(limit=60)
+    recent_down_reasons = [
+        (it.get("reason") or "").strip()
+        for it in feedback_items
+        if it.get("rating") == "down" and it.get("template_name") == template_name
+    ]
+    recent_down_reasons = [r for r in recent_down_reasons if r][:3]
+    feedback_avoid = ""
+    if recent_down_reasons:
+        bullets = "\n".join([f"- {r}" for r in recent_down_reasons])
+        feedback_avoid = f"""
+Common issues to avoid (from user feedback on previous SOPs):
+{bullets}
+""".strip()
 
     strictness_instructions = (
         "Strictness: STRICT. Use a formal, policy-like tone. Use short, unambiguous steps. "
@@ -193,6 +241,8 @@ Tools/systems used: {tools_used or "Not specified"}
 Compliance standard(s): {compliance_standard or "Not specified"}
 Tone: {tone}
 {strictness_instructions}
+
+{feedback_avoid}
 
 {notes_based_section}
 
@@ -666,6 +716,44 @@ if generate:
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
 
+            st.markdown("### Rate this SOP")
+            rating = st.radio(
+                "Was this SOP helpful?",
+                ["👍 Thumbs Up", "👎 Thumbs Down"],
+                horizontal=True,
+                key=f"rating_{sop_fingerprint(sop_text)}",
+            )
+            reason = ""
+            if rating.startswith("👎"):
+                reason = st.text_area(
+                    "What should be improved?",
+                    placeholder="e.g., missing roles, unclear steps, wrong order, missing records, too long/short...",
+                    key=f"reason_{sop_fingerprint(sop_text)}",
+                )
+            if st.button("Submit feedback", key=f"submit_{sop_fingerprint(sop_text)}"):
+                append_feedback(
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "rating": "up" if rating.startswith("👍") else "down",
+                        "reason": reason.strip(),
+                        "template_name": template_name,
+                        "strictness": strictness,
+                        "tone": tone,
+                        "compliance_standard": compliance_standard or "",
+                        "audience": (audience or "").strip(),
+                        "tools_used": (tools_used or "").strip(),
+                        "include_definitions": bool(include_definitions),
+                        "include_safety_compliance": bool(include_safety_compliance),
+                        "include_records": bool(include_records),
+                        "include_checklist": bool(include_checklist),
+                        "model": model,
+                        "temperature": float(temperature),
+                        "notes_chars": len((notes or "").strip()),
+                        "sop_sha256": sop_fingerprint(sop_text),
+                    }
+                )
+                st.success("Thanks — feedback saved.")
+
 
 # --- Step 2: Quality pass (Review & Fix) ---
 last_sop = st.session_state.get("last_sop_text", "")
@@ -719,6 +807,45 @@ if api_key and last_sop:
                 file_name=f"{safe_name}-revised.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
+
+        st.markdown("### Rate the revised SOP")
+        rating2 = st.radio(
+            "Was the revised SOP helpful?",
+            ["👍 Thumbs Up", "👎 Thumbs Down"],
+            horizontal=True,
+            key=f"rating_rev_{sop_fingerprint(fixed_sop)}",
+        )
+        reason2 = ""
+        if rating2.startswith("👎"):
+            reason2 = st.text_area(
+                "What should still be improved?",
+                placeholder="Be specific about what’s missing or unclear.",
+                key=f"reason_rev_{sop_fingerprint(fixed_sop)}",
+            )
+        if st.button("Submit revised feedback", key=f"submit_rev_{sop_fingerprint(fixed_sop)}"):
+            append_feedback(
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "rating": "up" if rating2.startswith("👍") else "down",
+                    "reason": reason2.strip(),
+                    "template_name": template_name,
+                    "strictness": strictness,
+                    "tone": tone,
+                    "compliance_standard": compliance_standard or "",
+                    "audience": (audience or "").strip(),
+                    "tools_used": (tools_used or "").strip(),
+                    "include_definitions": bool(include_definitions),
+                    "include_safety_compliance": bool(include_safety_compliance),
+                    "include_records": bool(include_records),
+                    "include_checklist": bool(include_checklist),
+                    "model": model,
+                    "temperature": float(temperature),
+                    "notes_chars": len((st.session_state.get("notes") or "").strip()),
+                    "sop_sha256": sop_fingerprint(fixed_sop),
+                    "source": "revised",
+                }
+            )
+            st.success("Thanks — feedback saved.")
 
 
 # --- Visual Flowchart ---
