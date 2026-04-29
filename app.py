@@ -19,6 +19,85 @@ from sklearn.metrics.pairwise import cosine_similarity
 st.set_page_config(page_title="AI SOP Generator", layout="wide")
 
 
+st.markdown(
+    """
+<style>
+/* ---- Lively UI polish (safe CSS overrides) ---- */
+
+/* Soft animated gradient on the app background */
+.stApp {
+  background: radial-gradient(1200px 600px at 10% 10%, rgba(225, 48, 108, 0.14), transparent 60%),
+              radial-gradient(900px 600px at 90% 20%, rgba(131, 58, 180, 0.16), transparent 55%),
+              radial-gradient(900px 700px at 50% 90%, rgba(252, 175, 69, 0.14), transparent 60%),
+              linear-gradient(180deg, rgba(255, 247, 251, 1) 0%, rgba(243, 240, 255, 1) 100%);
+  background-size: 120% 120%;
+  animation: bgShift 14s ease-in-out infinite;
+}
+
+@keyframes bgShift {
+  0%   { background-position: 0% 0%; }
+  50%  { background-position: 100% 40%; }
+  100% { background-position: 0% 0%; }
+}
+
+/* Sidebar card feel */
+section[data-testid="stSidebar"] > div {
+  background: rgba(255, 255, 255, 0.65);
+  backdrop-filter: blur(10px);
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+/* Main content container spacing */
+div.block-container {
+  padding-top: 1.25rem;
+  padding-bottom: 2.5rem;
+}
+
+/* Buttons: punchy gradient + hover lift */
+div.stButton > button {
+  border: 0;
+  border-radius: 14px;
+  padding: 0.65rem 1rem;
+  background: linear-gradient(135deg, #E1306C 0%, #833AB4 55%, #FCAF45 100%);
+  color: white !important;
+  box-shadow: 0 10px 24px rgba(131, 58, 180, 0.20);
+  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+}
+div.stButton > button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px rgba(131, 58, 180, 0.26);
+  filter: saturate(1.05);
+}
+div.stButton > button:active {
+  transform: translateY(0px) scale(0.99);
+  box-shadow: 0 8px 18px rgba(131, 58, 180, 0.18);
+}
+
+/* Inputs: softer corners */
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea,
+div[data-baseweb="select"] > div {
+  border-radius: 14px !important;
+}
+
+/* Expanders: card look */
+div[data-testid="stExpander"] {
+  border-radius: 16px;
+  border: 1px solid rgba(0,0,0,0.08);
+  background: rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(10px);
+}
+
+/* Headings slightly tighter */
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
 SVG_CODE = """
 <svg xmlns="http://w3.org/2000/svg" viewBox="0 0 240 80" width="240" height="80">
   <rect x="0" y="0" width="240" height="80" fill="#ffffff" rx="12" ry="12"/>
