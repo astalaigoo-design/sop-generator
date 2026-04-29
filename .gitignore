@@ -3,3 +3,7 @@ venv/
 __pycache__/
 *.pyc
 .streamlit/
+.streamlit/secrets.toml
+.streamlit/company_profile.json
+.streamlit/feedback.jsonl
+.streamlit/history.json
