@@ -5,6 +5,7 @@ import streamlit as st
 import base64
 import json
 from io import BytesIO
+import streamlit.components.v1 as components
 from fpdf import FPDF
 from groq import Groq
 from docx import Document
@@ -267,6 +268,64 @@ SOP to review:
     return completion.choices[0].message.content or ""
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def generate_flowchart_mermaid_cached(
+    *,
+    api_key: str,
+    model: str,
+    temperature: float,
+    sop_text: str,
+) -> str:
+    client = Groq(api_key=api_key)
+    prompt = f"""
+Create a Mermaid flowchart for the SOP below.
+
+Rules:
+- Output ONLY Mermaid code.
+- Start with: flowchart TD
+- Keep it readable: at most ~18 nodes.
+- Use decision diamonds with labels like "Yes"/"No" paths when needed.
+- Include start/end nodes.
+- Do NOT include markdown fences.
+
+SOP:
+{sop_text}
+""".strip()
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You convert SOPs into clear flowcharts."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=float(temperature),
+    )
+    return (completion.choices[0].message.content or "").strip()
+
+
+def render_mermaid(mermaid_code: str, *, height_px: int = 700) -> None:
+    code = (mermaid_code or "").strip()
+    if not code:
+        st.info("No flowchart to display.")
+        return
+
+    # Mermaid is rendered client-side via CDN.
+    html = f"""
+<div class="mermaid">
+{code}
+</div>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({{
+    startOnLoad: true,
+    theme: "default",
+    flowchart: {{ curve: "basis" }}
+  }});
+</script>
+"""
+    components.html(html, height=height_px, scrolling=True)
+
+
 logo_url = render_svg_data_uri(SVG_CODE)
 
 with st.sidebar:
@@ -511,3 +570,35 @@ if api_key and last_sop:
                 file_name=f"{safe_name}-revised.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
+
+
+# --- Visual Flowchart ---
+candidate_sop_for_flowchart = st.session_state.get("last_fixed_sop_text") or st.session_state.get("last_sop_text") or ""
+if api_key and candidate_sop_for_flowchart:
+    st.divider()
+    st.subheader("Visual flowchart")
+    st.caption("Generates a flowchart from the latest SOP (revised if available).")
+
+    gen_chart = st.button("Generate Flowchart")
+    if gen_chart:
+        with st.spinner("Generating flowchart..."):
+            try:
+                mermaid_code = generate_flowchart_mermaid_cached(
+                    api_key=api_key,
+                    model=model,
+                    temperature=0.2,
+                    sop_text=candidate_sop_for_flowchart,
+                )
+                st.session_state.last_mermaid_flowchart = mermaid_code
+            except Exception as e:
+                st.error(f"Flowchart generation failed: {e}")
+
+    mermaid_code = st.session_state.get("last_mermaid_flowchart", "")
+    if mermaid_code:
+        render_mermaid(mermaid_code, height_px=700)
+        st.download_button(
+            "Download Flowchart (Mermaid)",
+            data=mermaid_code.encode("utf-8"),
+            file_name="sop-flowchart.mmd",
+            mime="text/plain",
+        )
