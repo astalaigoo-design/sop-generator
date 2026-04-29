@@ -8,3 +8,7 @@ google-generativeai
 fpdf2
 
 python-docx
+
+
+pypdf
+scikit-learn
