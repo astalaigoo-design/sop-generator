@@ -1,0 +1,15 @@
+theme]
+# Modern, high-contrast, readable theme
+base = "dark"
+primaryColor = "#6D5EFc"
+backgroundColor = "#0B1020"
+secondaryBackgroundColor = "#121A33"
+textColor = "#EAF0FF"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+headless = true
+
