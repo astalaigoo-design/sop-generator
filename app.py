@@ -177,6 +177,7 @@ def get_groq_api_key() -> str | None:
 
 COMPANY_PROFILE_PATH = os.path.join(".streamlit", "company_profile.json")
 FEEDBACK_PATH = os.path.join(".streamlit", "feedback.jsonl")
+HISTORY_PATH = os.path.join(".streamlit", "history.json")
 
 
 def load_company_profile() -> dict:
@@ -222,6 +223,39 @@ def load_recent_feedback(limit: int = 50) -> list[dict]:
         return out
     except Exception:
         return []
+
+
+def load_history() -> list[dict]:
+    try:
+        if not os.path.exists(HISTORY_PATH):
+            return []
+        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_history(items: list[dict]) -> None:
+    os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
+
+
+def add_to_history(entry: dict, *, limit: int = 5) -> None:
+    items = load_history()
+    items.insert(0, entry)
+    # de-dupe by sop_sha256 if present
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for it in items:
+        key = str(it.get("sop_sha256") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        deduped.append(it)
+    save_history(deduped[:limit])
 
 
 TEMPLATE_GUIDANCE: dict[str, str] = {
@@ -639,6 +673,37 @@ with st.sidebar:
     else:
         st.caption("No manuals uploaded.")
 
+    st.markdown("### History (last 5)")
+    history_items = load_history()
+    if history_items:
+        options = []
+        for i, it in enumerate(history_items):
+            ts = (it.get("ts") or "")[:19].replace("T", " ")
+            label = it.get("label") or it.get("template_name") or "SOP"
+            options.append(f"{i+1}. {label} — {ts}")
+
+        selected = st.selectbox("Saved SOPs", options, index=0)
+        sel_idx = int(selected.split(".")[0]) - 1
+        selected_item = history_items[sel_idx]
+
+        if st.button("Load into editor"):
+            st.session_state.current_sop_text = selected_item.get("sop_text", "") or ""
+            st.session_state.last_inferred_topic = selected_item.get("label", "SOP") or "SOP"
+            st.success("Loaded into editor.")
+
+        col_h1, col_h2 = st.columns(2)
+        with col_h1:
+            if st.button("Delete selected"):
+                remaining = [it for j, it in enumerate(history_items) if j != sel_idx]
+                save_history(remaining[:5])
+                st.success("Deleted.")
+        with col_h2:
+            if st.button("Clear history"):
+                save_history([])
+                st.success("Cleared.")
+    else:
+        st.caption("No saved SOPs yet.")
+
     st.markdown("### Settings")
     template_name = st.selectbox(
         "Template",
@@ -826,6 +891,17 @@ if generate:
                 )
                 st.session_state.last_sop_text = sop_text
                 st.session_state.last_inferred_topic = inferred_topic
+
+                add_to_history(
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "label": inferred_topic,
+                        "template_name": template_name,
+                        "source": "generated",
+                        "sop_text": sop_text,
+                        "sop_sha256": sop_fingerprint(sop_text),
+                    }
+                )
             except Exception as e:
                 st.error(f"Generation failed: {e}")
                 sop_text = ""
@@ -937,6 +1013,18 @@ if api_key and last_sop:
                     compliance_standard=compliance_standard.strip(),
                 )
                 st.session_state.last_fixed_sop_text = fixed
+
+                inferred_topic = st.session_state.get("last_inferred_topic", "SOP")
+                add_to_history(
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "label": f"{inferred_topic} (revised)",
+                        "template_name": template_name,
+                        "source": "revised",
+                        "sop_text": fixed,
+                        "sop_sha256": sop_fingerprint(fixed),
+                    }
+                )
             except Exception as e:
                 st.error(f"Review failed: {e}")
 
