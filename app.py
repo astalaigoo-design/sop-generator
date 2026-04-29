@@ -450,6 +450,67 @@ SOP to review:
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def compliance_audit_cached(
+    *,
+    api_key: str,
+    model: str,
+    temperature: float,
+    sop_text: str,
+    template_name: str,
+    strictness: str,
+    tone: str,
+    compliance_standard: str,
+    company_rules_context: str,
+) -> str:
+    client = Groq(api_key=api_key)
+    prompt = f"""
+You are a Compliance Auditor (AI Critic). Review the SOP below and critique it.
+
+Context:
+- Template: {template_name}
+- Compliance standard(s): {compliance_standard or "Not specified"}
+- Strictness: {strictness}
+- Tone: {tone}
+
+Company rules (if provided; treat as policy requirements):
+{company_rules_context or "None"}
+
+What to check:
+- Compliance gaps or risky/unsafe steps
+- Missing roles/responsibilities, approvals, evidence/records
+- Unclear, untestable, or ambiguous steps
+- Missing exceptions/edge cases and escalation paths
+- Missing safety controls (PPE, cross-contamination, PHI/PII, access control, etc.) when relevant
+- Conflicts with company rules (if any) and how to resolve them
+
+Output format (use these headings exactly):
+## Summary
+## Findings (ranked)
+- [High] ...
+- [Medium] ...
+- [Low] ...
+## Missing items checklist
+- ...
+## Recommended fixes
+1. ...
+
+Return only the critique (no extra commentary).
+
+SOP:
+{sop_text}
+""".strip()
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a strict compliance auditor and SOP critic."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=float(temperature),
+    )
+    return completion.choices[0].message.content or ""
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
 def generate_flowchart_mermaid_cached(
     *,
     api_key: str,
@@ -1118,6 +1179,37 @@ if api_key and last_sop:
                 }
             )
             st.success("Thanks — feedback saved.")
+
+
+# --- Compliance Auditor (AI Critic) ---
+candidate_sop_for_audit = st.session_state.get("last_fixed_sop_text") or st.session_state.get("last_sop_text") or ""
+if api_key and candidate_sop_for_audit:
+    st.divider()
+    st.subheader("Compliance Auditor (AI Critic)")
+    st.caption("A second AI pass that critiques the SOP for gaps, risks, and missing compliance items.")
+
+    run_audit = st.button("Review SOP (Auditor)")
+    if run_audit:
+        with st.spinner("Auditing SOP..."):
+            try:
+                audit = compliance_audit_cached(
+                    api_key=api_key,
+                    model=model,
+                    temperature=0.2,
+                    sop_text=candidate_sop_for_audit,
+                    template_name=template_name,
+                    strictness=strictness,
+                    tone=tone,
+                    compliance_standard=compliance_standard.strip(),
+                    company_rules_context=st.session_state.get("company_rules_context", "").strip(),
+                )
+                st.session_state.last_audit_text = audit
+            except Exception as e:
+                st.error(f"Audit failed: {e}")
+
+    audit_text = st.session_state.get("last_audit_text", "")
+    if audit_text:
+        st.markdown(audit_text)
 
 
 # --- Visual Flowchart ---
