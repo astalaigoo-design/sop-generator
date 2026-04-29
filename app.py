@@ -349,6 +349,49 @@ def transcribe_audio_cached(
     return (getattr(transcription, "text", None) or "").strip()
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def analyze_image_to_notes_cached(
+    *,
+    api_key: str,
+    model: str,
+    file_sha256: str,
+    mime_type: str,
+    image_b64: str,
+) -> str:
+    client = Groq(api_key=api_key)
+    prompt = """
+You are extracting actionable SOP notes from an image.
+
+Return concise NOTES ONLY (no preamble), as bullet points grouped by:
+- What is shown
+- Key entities (tools/systems/roles)
+- Steps / sequence (if implied)
+- Requirements / constraints
+- Risks / safety / compliance signals
+- Any numbers, dates, thresholds, or checklists visible
+
+If the image is a form/table/screenshot, capture the important fields and values.
+Do not invent details; if unclear, say "Unclear in image".
+""".strip()
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+                    },
+                ],
+            }
+        ],
+        temperature=0.1,
+    )
+    return (completion.choices[0].message.content or "").strip()
+
 logo_url = render_svg_data_uri(SVG_CODE)
 
 with st.sidebar:
@@ -517,11 +560,51 @@ with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
         except Exception as e:
             st.error(f"Transcription failed: {e}")
 
+with st.expander("Vision (Image Analysis)", expanded=False):
+    st.caption("Upload an image (photo/screenshot). We'll extract structured notes and fill the Notes box.")
+    image_file = st.file_uploader(
+        "Upload image",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=False,
+    )
+    vision_model = st.selectbox(
+        "Vision model",
+        ["meta-llama/llama-4-scout-17b-16e-instruct"],
+        index=0,
+    )
+
+    if image_file is not None:
+        st.image(image_file, caption=image_file.name, use_container_width=True)
+
+    if st.button("Analyze image", disabled=(not api_key or image_file is None)):
+        try:
+            image_bytes = image_file.getvalue()
+            file_sha = hashlib.sha256(image_bytes).hexdigest()
+            mime_type = image_file.type or "image/png"
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+            with st.spinner("Analyzing image..."):
+                extracted_notes = analyze_image_to_notes_cached(
+                    api_key=api_key,
+                    model=vision_model,
+                    file_sha256=file_sha,
+                    mime_type=mime_type,
+                    image_b64=image_b64,
+                )
+
+            if extracted_notes:
+                st.session_state.notes = extracted_notes
+                st.success("Image analysis complete. The Notes box below was filled.")
+            else:
+                st.error("Image analysis returned empty text.")
+        except Exception as e:
+            st.error(f"Image analysis failed: {e}")
+
 notes = st.text_area(
     "Input notes / raw text",
     key="notes",
     height=220,
-    placeholder="Paste your notes here (or use Voice Mode to transcribe audio).",
+    placeholder="Paste your notes here (or use Voice Mode / Vision to generate notes).",
 )
 
 generate = st.button("Generate SOP", type="primary", disabled=not api_key)
