@@ -137,14 +137,13 @@ Use this before going live (Streamlit Cloud: **App settings → Secrets**; local
 | `SELF_SIGNUP_ENABLED` | No | Default **on**: “Create workspace” public signup. Set `false` for invite-only tenants. |
 | `DEBUG_ERRORS` | No | Leave **unset** or `false` in production; use `true` only while debugging. |
 | `APP_ACCESS_PASSWORD` | No | Optional extra gate **before** login; SaaS usually uses login only. |
-| `SESSION_SIGNING_SECRET` | **Yes** (recommended) | Long random string used to sign **browser cookies** so a full page refresh does not return users to the login wall. If unset, login is **in-memory only** (older behavior). See also `SESSION_COOKIE_DAYS`, `SESSION_COOKIE_SECURE`, `SESSION_COOKIE_NAME`. |
+| `SESSION_COOKIE_SECRET` | **Recommended** (prod) | Long random string (e.g. `openssl rand -hex 32`). Enables a signed browser cookie so **a full page refresh** keeps the user signed in (Streamlit’s server session alone does not). Without this secret, users return to the login screen after refresh. |
+| `SESSION_COOKIE_DAYS` | No | Sign-in cookie lifetime in days (default **30**, max **366**). |
 | `APP_LOG_PATH` | No | Overrides log file path (default uses system temp). |
 | `DEFAULT_*_PER_DAY` | No | Quota defaults for new tenants (`DEFAULT_GENERATIONS_PER_DAY`, etc.). |
 | `[branding]` | No | Optional white-label (see `.streamlit/secrets.toml.example`). |
 
 After changing secrets on Streamlit Cloud, **restart the app** (Redeploy / reboot).
-
-**Browser sessions (refresh-friendly login):** Set `SESSION_SIGNING_SECRET` in secrets. After sign-in, a signed cookie keeps the session across **full page refresh**; the app still re-checks the user in the database (disabled or unverified accounts are rejected and the cookie is cleared). The optional `APP_ACCESS_PASSWORD` gate can use the same secret to remember that step in the browser. For local `http://` dev, `SESSION_COOKIE_SECURE` defaults to off unless you set it; with `https://` in `APP_BASE_URL`, secure cookies are the default.
 
 ---
 
