@@ -19,6 +19,7 @@ from secrets import token_urlsafe
 from pathlib import Path
 import traceback
 from fpdf import FPDF
+from fpdf.enums import XPos, YPos
 from groq import Groq
 from docx import Document
 from pypdf import PdfReader
@@ -1637,7 +1638,7 @@ def _render_sop_to_pdf(pdf: SopReportPDF, md: str) -> None:
     pdf.set_y(20)
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(95, 99, 108)
-    pdf.cell(0, 5, pdf.organization, align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, pdf.organization, align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(4)
     pdf.set_font("Helvetica", "B", 20)
     pdf.set_text_color(22, 27, 40)
@@ -1645,10 +1646,11 @@ def _render_sop_to_pdf(pdf: SopReportPDF, md: str) -> None:
     pdf.ln(3)
     pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(110, 114, 122)
-    pdf.cell(0, 6, "Standard Operating Procedure", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, "Standard Operating Procedure", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("Helvetica", "", 8)
-    stamp = datetime.now(timezone.utc).strftime("%d %B %Y") + " \xb7 UTC"
-    pdf.cell(0, 5, stamp, align="C", new_x="LMARGIN", new_y="NEXT")
+    # ASCII-only — locale-aware "%B" month names break Helvetica / latin-1 on non-English hosts.
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    pdf.cell(0, 5, stamp, align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(10)
     pdf.set_draw_color(195, 198, 206)
     pdf.set_line_width(0.45)
@@ -1707,20 +1709,43 @@ def _render_sop_to_pdf(pdf: SopReportPDF, md: str) -> None:
         pdf.multi_cell(0, line_h, _normalize_pdf_text(line))
 
 
-def create_pdf_bytes(text):
-    brand = get_branding()
-    organization = _normalize_pdf_text(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
-    pdf = SopReportPDF(organization=organization)
-    pdf.alias_nb_pages()
-    doc_title = _extract_title_from_sop_markdown(text or "")
-    pdf.set_title(doc_title[:180])
-    pdf.set_creator(organization[:120])
-    _render_sop_to_pdf(pdf, text or "")
-
+def _create_pdf_bytes_simple_fallback(text: str) -> bytes:
+    """Plain layout if the styled SOP PDF fails (keeps download buttons working)."""
+    pdf = FPDF(unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_margins(18, 18, 18)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=11)
+    clean = _normalize_pdf_text(text or "")
+    pdf.multi_cell(0, 6, txt=clean)
     out = pdf.output(dest="S")
     if isinstance(out, str):
         return out.encode("latin-1")
     return bytes(out)
+
+
+def create_pdf_bytes(text):
+    try:
+        brand = get_branding()
+        organization = _normalize_pdf_text(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
+        pdf = SopReportPDF(organization=organization)
+        pdf.alias_nb_pages()
+        doc_title = _extract_title_from_sop_markdown(text or "")
+        pdf.set_title(doc_title[:180])
+        pdf.set_creator(organization[:120])
+        _render_sop_to_pdf(pdf, text or "")
+
+        out = pdf.output(dest="S")
+        if isinstance(out, str):
+            return out.encode("latin-1")
+        return bytes(out)
+    except Exception as ex:
+        log_exception(ex, context="create_pdf_bytes styled layout")
+        try:
+            return _create_pdf_bytes_simple_fallback(text or "")
+        except Exception as ex2:
+            log_exception(ex2, context="create_pdf_bytes fallback")
+            return b""
 
 
 def create_docx_bytes(title: str, text: str) -> bytes:
@@ -1927,24 +1952,6 @@ def save_company_profile(*, tenant_id: int | None, profile: dict) -> None:
         row.tone = str(profile.get("tone", "Professional") or "Professional")
         row.updated_at = datetime.now(timezone.utc)
         s.commit()
-
-
-def log_exception(ex: Exception, *, context: str) -> None:
-    """Write exception details to a local log file for support/debugging."""
-    try:
-        os.makedirs(os.path.dirname(APP_LOG_PATH), exist_ok=True)
-        with open(APP_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"\n[{datetime.now(timezone.utc).isoformat()}] {context}\n")
-            f.write("".join(traceback.format_exception(type(ex), ex, ex.__traceback__)))
-    except Exception:
-        # Never let logging break the app UX.
-        pass
-
-
-def show_busy_error(ex: Exception | None = None, *, context: str = "Unhandled error") -> None:
-    if ex is not None:
-        log_exception(ex, context=context)
-    st.error("Something went wrong. Please try again. If this continues, contact support.")
 
 
 def append_feedback(*, tenant_id: int | None, entry: dict) -> None:
@@ -3556,13 +3563,18 @@ if current_sop:
 
     inferred_topic = str(st.session_state.get("last_inferred_topic") or "sop")
     safe_name = "".join(c for c in inferred_topic.strip() if c.isalnum() or c in (" ", "-", "_")).strip() or "sop"
+    current_pdf = b""
+    current_docx = b""
     try:
         current_pdf = create_pdf_bytes(current_sop)
+    except Exception as e:
+        log_exception(e, context="Prepare current SOP PDF")
+        show_busy_error(e, context="Prepare current SOP PDF")
+    try:
         current_docx = create_docx_bytes(safe_name, current_sop)
     except Exception as e:
-        current_pdf = b""
-        current_docx = b""
-        show_busy_error(e, context="Prepare current SOP downloads")
+        log_exception(e, context="Prepare current SOP DOCX")
+        show_busy_error(e, context="Prepare current SOP DOCX")
 
     with st.expander("Edit SOP (client-ready)", expanded=False):
         edited_current = st.text_area(
@@ -3709,13 +3721,18 @@ if api_key and last_sop:
                     st.success("Reset to the revised SOP.")
 
         sop_for_download = st.session_state.get("current_sop_text") or fixed_sop
+        pdf_bytes = b""
+        docx_bytes = b""
         try:
             pdf_bytes = create_pdf_bytes(sop_for_download)
+        except Exception as e:
+            log_exception(e, context="Prepare revised SOP PDF")
+            show_busy_error(e, context="Prepare revised SOP PDF")
+        try:
             docx_bytes = create_docx_bytes(safe_name, sop_for_download)
-        except Exception:
-            pdf_bytes = b""
-            docx_bytes = b""
-            show_busy_error()
+        except Exception as e:
+            log_exception(e, context="Prepare revised SOP DOCX")
+            show_busy_error(e, context="Prepare revised SOP DOCX")
 
         col_c, col_d = st.columns(2)
         with col_c:
