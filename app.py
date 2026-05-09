@@ -480,8 +480,15 @@ def _login_required() -> bool:
 
 
 def _self_signup_allowed() -> bool:
-    """SaaS self-service ‘Create workspace’. Set SELF_SIGNUP_ENABLED=false to disable."""
-    return _coerce_bool(_secret_first("SELF_SIGNUP_ENABLED", "ALLOW_SELF_SIGNUP"), True)
+    """SaaS self-service ‘Create workspace’. Set SELF_SIGNUP_ENABLED=false in secrets to disable.
+
+    When the secret is **unset**, signup is **on** (default for SaaS). Using `_coerce_bool(None, True)`
+    is wrong: `str(None) == "none"` would incorrectly turn signup off.
+    """
+    raw = _secret_first("SELF_SIGNUP_ENABLED", "ALLOW_SELF_SIGNUP")
+    if raw is None or str(raw).strip() == "":
+        return True
+    return _coerce_bool(raw, False)
 
 
 def _sanitize_tenant_slug(raw: str) -> str:
