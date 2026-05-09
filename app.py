@@ -1545,17 +1545,179 @@ TENANT_ID: int | None = _auth.get("tenant_id")
 USER_ID: int | None = _auth.get("user_id")
 USER_ROLE: str = str(_auth.get("role") or "member")
 
-def create_pdf_bytes(text):
-    pdf = FPDF()
+def _normalize_pdf_text(s: str) -> str:
+    """Best-effort Latin-1 for core PDF fonts (Helvetica)."""
+    if not s:
+        return ""
+    t = unicodedata.normalize("NFKC", str(s))
+    for a, b in (
+        ("\u2013", "-"),
+        ("\u2014", "-"),
+        ("\u2212", "-"),
+        ("\u2018", "'"),
+        ("\u2019", "'"),
+        ("\u201c", '"'),
+        ("\u201d", '"'),
+        ("\u2022", "-"),
+        ("\u00b7", "-"),
+        ("\u2026", "..."),
+        ("\u00a0", " "),
+    ):
+        t = t.replace(a, b)
+    return t.encode("latin-1", "replace").decode("latin-1")
+
+
+def _extract_title_from_sop_markdown(md: str) -> str:
+    lines = (md or "").splitlines()
+    in_title = False
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("## Title"):
+            in_title = True
+            continue
+        if in_title:
+            if s.startswith("## ") and not s.startswith("## Title"):
+                break
+            if s:
+                return _normalize_pdf_text(s[:240])
+    return "Standard Operating Procedure"
+
+
+def _iter_sop_pdf_body_lines(md: str):
+    """Skip the ## Title section (title is rendered on the cover)."""
+    skipping_title = False
+    for raw in (md or "").splitlines():
+        st = raw.strip()
+        if st.startswith("## Title"):
+            skipping_title = True
+            continue
+        if skipping_title:
+            if st.startswith("## ") and not st.startswith("## Title"):
+                skipping_title = False
+            else:
+                continue
+        yield raw
+
+
+class SopReportPDF(FPDF):
+    """A4 SOP layout: cover block on page 1, section hierarchy, header/footer from page 2."""
+
+    def __init__(self, *, organization: str):
+        super().__init__(unit="mm", format="A4")
+        self.organization = organization
+        self.set_auto_page_break(auto=True, margin=18)
+        self.set_margins(18, 22, 18)
+
+    def header(self):
+        if self.page_no() == 1:
+            return
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(115, 118, 128)
+        self.cell(0, 5, self.organization, align="R")
+        self.ln(1)
+        self.set_draw_color(220, 222, 228)
+        self.set_line_width(0.25)
+        y = self.get_y()
+        self.line(self.l_margin, y, self.w - self.r_margin, y)
+        self.ln(4)
+
+    def footer(self):
+        self.set_y(-12)
+        self.set_font("Helvetica", "I", 8)
+        self.set_text_color(140, 142, 150)
+        self.cell(0, 8, f"Page {self.page_no()} of {{nb}}", align="C")
+
+
+def _render_sop_to_pdf(pdf: SopReportPDF, md: str) -> None:
     pdf.add_page()
-    pdf.set_font("Helvetica", size=12)
-    
-    # Clean the text
-    clean_text = (text or "").encode("latin-1", "ignore").decode("latin-1")
-    pdf.multi_cell(0, 10, txt=clean_text)
-    
+    title = _extract_title_from_sop_markdown(md)
+    content_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+    # --- Cover (page 1) ---
+    pdf.set_y(20)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(95, 99, 108)
+    pdf.cell(0, 5, pdf.organization, align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_text_color(22, 27, 40)
+    pdf.multi_cell(0, 9, title, align="C")
+    pdf.ln(3)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(110, 114, 122)
+    pdf.cell(0, 6, "Standard Operating Procedure", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 8)
+    stamp = datetime.now(timezone.utc).strftime("%d %B %Y") + " \xb7 UTC"
+    pdf.cell(0, 5, stamp, align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(10)
+    pdf.set_draw_color(195, 198, 206)
+    pdf.set_line_width(0.45)
+    y_rule = pdf.get_y()
+    pdf.line(pdf.l_margin, y_rule, pdf.w - pdf.r_margin, y_rule)
+    pdf.ln(11)
+
+    pdf.set_text_color(38, 40, 48)
+    body_font = 11
+    line_h = 5.8
+
+    for raw in _iter_sop_pdf_body_lines(md):
+        line = raw.rstrip()
+        s = line.strip()
+        if not s:
+            pdf.ln(3)
+            continue
+        if s.startswith("### "):
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.set_text_color(18, 58, 92)
+            pdf.multi_cell(0, 7, _normalize_pdf_text(s[4:]))
+            pdf.set_font("Helvetica", "", body_font)
+            pdf.set_text_color(38, 40, 48)
+            pdf.ln(1)
+            continue
+        if s.startswith("## "):
+            pdf.ln(4)
+            pdf.set_font("Helvetica", "B", 14)
+            pdf.set_text_color(22, 33, 62)
+            pdf.multi_cell(0, 8, _normalize_pdf_text(s[3:]))
+            pdf.set_font("Helvetica", "", body_font)
+            pdf.set_text_color(38, 40, 48)
+            pdf.ln(3)
+            continue
+        if s.startswith("# "):
+            pdf.set_font("Helvetica", "B", 16)
+            pdf.set_text_color(22, 27, 40)
+            pdf.multi_cell(0, 8, _normalize_pdf_text(s[2:]))
+            pdf.set_font("Helvetica", "", body_font)
+            pdf.set_text_color(38, 40, 48)
+            pdf.ln(3)
+            continue
+        if s.startswith("- ") or s.startswith("* "):
+            pdf.set_font("Helvetica", "", body_font)
+            pdf.set_text_color(38, 40, 48)
+            indent = 5.5
+            pdf.set_x(pdf.l_margin + indent)
+            bullet = "- " + _normalize_pdf_text(s[2:])
+            pdf.multi_cell(content_w - indent, line_h, bullet)
+            pdf.set_x(pdf.l_margin)
+            continue
+
+        pdf.set_font("Helvetica", "", body_font)
+        pdf.set_text_color(38, 40, 48)
+        pdf.multi_cell(0, line_h, _normalize_pdf_text(line))
+
+
+def create_pdf_bytes(text):
+    brand = get_branding()
+    organization = _normalize_pdf_text(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
+    pdf = SopReportPDF(organization=organization)
+    pdf.alias_nb_pages()
+    doc_title = _extract_title_from_sop_markdown(text or "")
+    pdf.set_title(doc_title[:180])
+    pdf.set_creator(organization[:120])
+    _render_sop_to_pdf(pdf, text or "")
+
     out = pdf.output(dest="S")
-    # fpdf (PyFPDF) may return `str`, while fpdf2 often returns `bytes`/`bytearray`.
     if isinstance(out, str):
         return out.encode("latin-1")
     return bytes(out)
