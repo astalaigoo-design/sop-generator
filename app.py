@@ -87,7 +87,8 @@ def _load_local_secrets() -> dict[str, object]:
 _LOCAL_SECRETS = _load_local_secrets()
 
 # --- Logging + safe error UX (must be defined before auth) ---
-APP_LOG_PATH = os.path.join(".streamlit", "app.log")
+_DEFAULT_LOG_PATH = os.path.join(os.getenv("TMPDIR") or os.getenv("TEMP") or "/tmp", "fluency-app.log")
+APP_LOG_PATH = os.getenv("APP_LOG_PATH") or _DEFAULT_LOG_PATH
 
 
 def log_exception(ex: Exception, *, context: str) -> None:
@@ -99,13 +100,34 @@ def log_exception(ex: Exception, *, context: str) -> None:
             f.write("".join(traceback.format_exception(type(ex), ex, ex.__traceback__)))
     except Exception:
         # Never let logging break the app UX.
-        pass
+        try:
+            st.session_state["_last_exception_context"] = context
+            st.session_state["_last_exception_text"] = "".join(
+                traceback.format_exception(type(ex), ex, ex.__traceback__)
+            )
+        except Exception:
+            pass
 
 
 def show_busy_error(ex: Exception | None = None, *, context: str = "Unhandled error") -> None:
     if ex is not None:
         log_exception(ex, context=context)
     st.error("Something went wrong. Please try again. If this continues, contact support.")
+
+    # Optional debug details (admin-only or DEBUG_ERRORS=true). Safe: never shows secrets unless you paste them.
+    try:
+        debug = str(_secret_or_env("DEBUG_ERRORS") or "").strip().lower() in {"1", "true", "yes", "on"}
+        role = str((st.session_state.get("auth_user") or {}).get("role") or "")
+        if debug or role == "admin":
+            with st.expander("Error details (admin/debug)", expanded=False):
+                st.caption(f"Context: {context}")
+                if ex is not None:
+                    st.exception(ex)
+                else:
+                    st.write(st.session_state.get("_last_exception_text") or "No exception captured.")
+                st.caption(f"Log file path: {APP_LOG_PATH}")
+    except Exception:
+        pass
 
 
 def _secret_or_env(name: str) -> str | None:
