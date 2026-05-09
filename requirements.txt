@@ -1,14 +1,9 @@
 streamlit
-google-generativeai
 groq
 fpdf2
-
-streamlit
-google-generativeai
-fpdf2
-
 python-docx
-
-
 pypdf
 scikit-learn
+SQLAlchemy
+psycopg2-binary
+passlib[bcrypt]
