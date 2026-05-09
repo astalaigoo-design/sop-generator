@@ -22,6 +22,31 @@ APP_ACCESS_PASSWORD = "change-me"
 GROQ_API_KEY = "gsk_your_key_here"
 ```
 
+### SaaS mode (recommended)
+
+For client deployments, use a real database and login instead of a shared password.
+
+Add to secrets:
+
+```toml
+DATABASE_URL = "postgresql+psycopg2://user:pass@host:5432/fluency"
+
+BOOTSTRAP_TENANT_SLUG = "acme"
+BOOTSTRAP_TENANT_NAME = "Acme Inc"
+BOOTSTRAP_ADMIN_EMAIL = "admin@acme.com"
+BOOTSTRAP_ADMIN_PASSWORD = "change-me"
+```
+
+### Quotas / rate limiting
+
+Default quotas (applied when a tenant is created) can be configured via secrets/env:
+
+```toml
+DEFAULT_GENERATIONS_PER_DAY = 50
+DEFAULT_TRANSCRIPTIONS_PER_DAY = 50
+DEFAULT_VISION_PER_DAY = 50
+```
+
 3. Start the app:
 
 ```bash
