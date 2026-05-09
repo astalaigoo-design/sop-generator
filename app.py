@@ -1,13 +1,20 @@
+import hmac
+import json
 import os
+import re
+import tomllib
 
+from collections.abc import Mapping
 
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 import base64
-import json
 from io import BytesIO
 import streamlit.components.v1 as components
 import hashlib
 from datetime import datetime, timezone
+from pathlib import Path
+import traceback
 from fpdf import FPDF
 from groq import Groq
 from docx import Document
@@ -16,90 +23,293 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 
-st.set_page_config(page_title="AI SOP Generator", layout="wide")
+DEFAULT_BRANDING: dict[str, object] = {
+    "app_name": "Fluency",
+    "tagline": "Capture expertise in a snap",
+    "page_title": "Fluency",
+    "page_icon": "🗣️",
+    "logo_url": "",
+    "logo_path": "",
+    "primary_color": "#E1306C",
+    "secondary_color": "#833AB4",
+    "accent_color": "#FCAF45",
+    "hide_powered_by": True,
+}
+
+_BRANDING_KEYS = frozenset(DEFAULT_BRANDING.keys())
 
 
-st.markdown(
+def _normalize_secret_value(value: object) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _load_local_secrets() -> dict[str, object]:
+    """Load local secrets from disk (dev convenience).
+
+    Streamlit Cloud uses `st.secrets` and does not rely on these files.
+    Locally, this allows password protection even if `.streamlit/secrets.toml`
+    can't be created (e.g., name collision with an existing folder).
     """
-<style>
-/* ---- Lively UI polish (safe CSS overrides) ---- */
+    candidates = [
+        os.path.join(".streamlit", "secrets.toml"),
+        os.path.join(".streamlit", "secrets.local.toml"),
+    ]
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+    return {}
 
-/* Soft animated gradient on the app background */
-.stApp {
-  background: radial-gradient(1200px 600px at 10% 10%, rgba(225, 48, 108, 0.14), transparent 60%),
-              radial-gradient(900px 600px at 90% 20%, rgba(131, 58, 180, 0.16), transparent 55%),
-              radial-gradient(900px 700px at 50% 90%, rgba(252, 175, 69, 0.14), transparent 60%),
-              linear-gradient(180deg, rgba(255, 247, 251, 1) 0%, rgba(243, 240, 255, 1) 100%);
-  background-size: 120% 120%;
-  animation: bgShift 14s ease-in-out infinite;
-}
 
-@keyframes bgShift {
-  0%   { background-position: 0% 0%; }
-  50%  { background-position: 100% 40%; }
-  100% { background-position: 0% 0%; }
-}
+_LOCAL_SECRETS = _load_local_secrets()
 
-/* Sidebar card feel */
-section[data-testid="stSidebar"] > div {
-  background: rgba(255, 255, 255, 0.65);
-  backdrop-filter: blur(10px);
-  border-right: 1px solid rgba(0, 0, 0, 0.06);
-}
 
-/* Main content container spacing */
-div.block-container {
-  padding-top: 1.25rem;
-  padding-bottom: 2.5rem;
-}
+def _secret_or_env(name: str) -> str | None:
+    """Read a scalar secret from secrets.toml when present; fall back to the same-named env var."""
+    try:
+        if name in st.secrets:
+            return _normalize_secret_value(st.secrets[name])
+    except StreamlitSecretNotFoundError:
+        pass
+    if name in _LOCAL_SECRETS:
+        return _normalize_secret_value(_LOCAL_SECRETS.get(name))
+    return _normalize_secret_value(os.getenv(name))
 
-/* Buttons: punchy gradient + hover lift */
-div.stButton > button {
-  border: 0;
-  border-radius: 14px;
-  padding: 0.65rem 1rem;
-  background: linear-gradient(135deg, #E1306C 0%, #833AB4 55%, #FCAF45 100%);
-  color: white !important;
-  box-shadow: 0 10px 24px rgba(131, 58, 180, 0.20);
-  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
-}
-div.stButton > button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 28px rgba(131, 58, 180, 0.26);
-  filter: saturate(1.05);
-}
-div.stButton > button:active {
-  transform: translateY(0px) scale(0.99);
-  box-shadow: 0 8px 18px rgba(131, 58, 180, 0.18);
-}
 
-/* Inputs: softer corners */
-div[data-baseweb="input"] input,
-div[data-baseweb="textarea"] textarea,
-div[data-baseweb="select"] > div {
-  border-radius: 14px !important;
-}
+def _optional_access_gate(brand: dict[str, object]) -> None:
+    """If APP_ACCESS_PASSWORD is set, require it before rendering the rest of the app."""
+    expected = _secret_or_env("APP_ACCESS_PASSWORD")
+    if not expected:
+        return
+    if st.session_state.get("_access_granted"):
+        return
+    st.title(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
+    st.caption("This deployment is password-protected.")
+    with st.form("access_gate"):
+        entered = st.text_input("Access password", type="password")
+        if st.form_submit_button("Continue"):
+            if hmac.compare_digest(
+                entered.encode("utf-8"),
+                expected.encode("utf-8"),
+            ):
+                st.session_state._access_granted = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+    st.stop()
 
-/* Expanders: card look */
-div[data-testid="stExpander"] {
-  border-radius: 16px;
-  border: 1px solid rgba(0,0,0,0.08);
-  background: rgba(255, 255, 255, 0.62);
-  backdrop-filter: blur(10px);
-}
 
-/* Headings slightly tighter */
-h1, h2, h3 {
-  letter-spacing: -0.02em;
-}
-</style>
-""",
-    unsafe_allow_html=True,
+def _coerce_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if not s:
+        return default
+    return s in ("1", "true", "yes", "on")
+
+
+def _safe_hex_color(value: object, default: str) -> str:
+    if value is None:
+        return default
+    s = str(value).strip()
+    if re.fullmatch(r"#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})", s):
+        return s
+    return default
+
+
+def _hex_to_rgb_tuple(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    r, g, b = _hex_to_rgb_tuple(hex_color)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def _branding_from_secrets_file() -> dict[str, object]:
+    b = _LOCAL_SECRETS.get("branding") if isinstance(_LOCAL_SECRETS, dict) else None
+    return dict(b) if isinstance(b, dict) else {}
+
+
+def _branding_from_streamlit_secrets() -> dict[str, object]:
+    try:
+        if "branding" not in st.secrets:
+            return {}
+        sec = st.secrets["branding"]
+    except StreamlitSecretNotFoundError:
+        return {}
+    if not isinstance(sec, Mapping):
+        return {}
+    raw = dict(sec)
+    return {str(k): v for k, v in raw.items() if str(k) in _BRANDING_KEYS}
+
+
+def _branding_env_overrides() -> dict[str, object]:
+    out: dict[str, object] = {}
+    mapping = {
+        "BRAND_APP_NAME": "app_name",
+        "BRAND_TAGLINE": "tagline",
+        "BRAND_PAGE_TITLE": "page_title",
+        "BRAND_PAGE_ICON": "page_icon",
+        "BRAND_LOGO_URL": "logo_url",
+        "BRAND_LOGO_PATH": "logo_path",
+        "BRAND_PRIMARY_COLOR": "primary_color",
+        "BRAND_SECONDARY_COLOR": "secondary_color",
+        "BRAND_ACCENT_COLOR": "accent_color",
+        "BRAND_HIDE_POWERED_BY": "hide_powered_by",
+    }
+    for env_key, brand_key in mapping.items():
+        val = os.getenv(env_key)
+        if val is None or val.strip() == "":
+            continue
+        if brand_key == "hide_powered_by":
+            out[brand_key] = _coerce_bool(val)
+        else:
+            out[brand_key] = val.strip()
+    return out
+
+
+def get_initial_branding() -> dict[str, object]:
+    """Branding safe to compute before the first Streamlit command.
+
+    Used for st.set_page_config so the favicon/tab icon can be customized.
+    """
+    merged: dict[str, object] = dict(DEFAULT_BRANDING)
+    merged.update({k: v for k, v in _branding_from_secrets_file().items() if k in _BRANDING_KEYS})
+    merged.update(_branding_env_overrides())
+    merged["page_icon"] = str(merged.get("page_icon") or DEFAULT_BRANDING["page_icon"])
+    merged["page_title"] = str(merged.get("page_title") or DEFAULT_BRANDING["page_title"])
+    return merged
+
+
+_initial_brand = get_initial_branding()
+st.set_page_config(
+    page_title=str(_initial_brand.get("page_title")),
+    page_icon=str(_initial_brand.get("page_icon")),
+    layout="wide",
 )
 
 
+def get_branding() -> dict[str, object]:
+    merged: dict[str, object] = dict(DEFAULT_BRANDING)
+    merged.update({k: v for k, v in _branding_from_secrets_file().items() if k in _BRANDING_KEYS})
+    merged.update({k: v for k, v in _branding_from_streamlit_secrets().items() if k in _BRANDING_KEYS})
+    merged.update(_branding_env_overrides())
+
+    merged["primary_color"] = _safe_hex_color(
+        merged.get("primary_color"), str(DEFAULT_BRANDING["primary_color"])
+    )
+    merged["secondary_color"] = _safe_hex_color(
+        merged.get("secondary_color"), str(DEFAULT_BRANDING["secondary_color"])
+    )
+    merged["accent_color"] = _safe_hex_color(
+        merged.get("accent_color"), str(DEFAULT_BRANDING["accent_color"])
+    )
+    merged["hide_powered_by"] = _coerce_bool(merged.get("hide_powered_by"), False)
+    merged["page_icon"] = str(merged.get("page_icon") or DEFAULT_BRANDING["page_icon"])
+    return merged
+
+
+def _sync_browser_tab_title(title: str) -> None:
+    safe = json.dumps(title or "SOP Generator")
+    components.html(
+        f"<script>try{{parent.document.title = {safe};}}catch(e){{}}</script>",
+        height=0,
+        width=0,
+    )
+
+
+def build_branding_css(brand: dict[str, object]) -> str:
+    pr = str(brand.get("primary_color"))
+    sec = str(brand.get("secondary_color"))
+    ac = str(brand.get("accent_color"))
+
+    shadow = _rgba(sec, 0.20)
+    shadow_h = _rgba(sec, 0.26)
+    shadow_a = _rgba(sec, 0.18)
+
+    return f"""
+<style>
+/* ---- White-label UI (brand colors) ---- */
+.stApp {{
+  /* Dark, muted base so the app doesn't feel overly bright */
+  background: radial-gradient(900px 500px at 10% 10%, {_rgba(pr, 0.10)}, transparent 60%),
+              radial-gradient(800px 520px at 90% 20%, {_rgba(sec, 0.10)}, transparent 55%),
+              radial-gradient(900px 600px at 50% 90%, {_rgba(ac, 0.08)}, transparent 60%),
+              linear-gradient(180deg, #0B0F1A 0%, #0A0D14 100%);
+  background-size: 120% 120%;
+  animation: bgShift 14s ease-in-out infinite;
+}}
+
+@keyframes bgShift {{
+  0%   {{ background-position: 0% 0%; }}
+  50%  {{ background-position: 100% 40%; }}
+  100% {{ background-position: 0% 0%; }}
+}}
+
+section[data-testid="stSidebar"] > div {{
+  background: rgba(18, 24, 39, 0.72);
+  backdrop-filter: blur(10px);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}}
+
+div.block-container {{
+  padding-top: 1.25rem;
+  padding-bottom: 2.5rem;
+}}
+
+div.stButton > button {{
+  border: 0;
+  border-radius: 14px;
+  padding: 0.65rem 1rem;
+  background: linear-gradient(135deg, {pr} 0%, {sec} 55%, {ac} 100%);
+  color: white !important;
+  box-shadow: 0 10px 24px {shadow};
+  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+}}
+div.stButton > button:hover {{
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px {shadow_h};
+  filter: saturate(1.05);
+}}
+div.stButton > button:active {{
+  transform: translateY(0px) scale(0.99);
+  box-shadow: 0 8px 18px {shadow_a};
+}}
+
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea,
+div[data-baseweb="select"] > div {{
+  border-radius: 14px !important;
+}}
+
+div[data-testid="stExpander"] {{
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(18, 24, 39, 0.55);
+  backdrop-filter: blur(10px);
+}}
+
+h1, h2, h3 {{
+  letter-spacing: -0.02em;
+}}
+</style>
+"""
+
+
 SVG_CODE = """
-<svg xmlns="http://w3.org/2000/svg" viewBox="0 0 240 80" width="240" height="80">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 80" width="240" height="80">
   <rect x="0" y="0" width="240" height="80" fill="#ffffff" rx="12" ry="12"/>
   <g transform="translate(20,40)">
     <circle cx="0" cy="0" r="24" fill="#0A74DA"/>
@@ -114,6 +324,46 @@ SVG_CODE = """
 def render_svg_data_uri(svg: str) -> str:
     b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
     return f"data:image/svg+xml;base64,{b64}"
+
+
+def resolve_brand_logo_url(brand: dict[str, object]) -> str:
+    url = str(brand.get("logo_url") or "").strip()
+    if url:
+        return url
+    path = str(brand.get("logo_path") or "").strip()
+    if path:
+        p = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        if os.path.isfile(p):
+            with open(p, "rb") as f:
+                raw = f.read()
+            ext = os.path.splitext(p)[1].lower()
+            mime = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+                ".svg": "image/svg+xml",
+            }.get(ext, "application/octet-stream")
+            b64 = base64.b64encode(raw).decode("ascii")
+            return f"data:{mime};base64,{b64}"
+    return render_svg_data_uri(SVG_CODE)
+
+
+def header_tagline(brand: dict[str, object]) -> str | None:
+    tag = str(brand.get("tagline") or "").strip()
+    if _coerce_bool(brand.get("hide_powered_by"), False):
+        return tag or None
+    if tag:
+        return tag
+    return "Powered by Groq"
+
+
+_brand = get_branding()
+_tab_title = str(_brand.get("page_title") or _brand.get("app_name") or DEFAULT_BRANDING["page_title"])
+_sync_browser_tab_title(_tab_title)
+st.markdown(build_branding_css(_brand), unsafe_allow_html=True)
+
+_optional_access_gate(_brand)
 
 def create_pdf_bytes(text):
     pdf = FPDF()
@@ -157,6 +407,26 @@ def create_docx_bytes(title: str, text: str) -> bytes:
 
 def sop_fingerprint(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+REQUIRED_SOP_HEADERS = ["## Title", "## Purpose", "## Roles", "## Procedures"]
+
+
+def is_valid_sop_markdown(md: str) -> bool:
+    """Validate SOP uses exactly the required H2 headers, in order."""
+    text = (md or "").strip()
+    if not text:
+        return False
+    # Must include required headers in order.
+    pos = -1
+    for h in REQUIRED_SOP_HEADERS:
+        nxt = text.find(h)
+        if nxt < 0 or nxt <= pos:
+            return False
+        pos = nxt
+    # Must not include any other H2 headers.
+    h2_lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("## ")]
+    return h2_lines == REQUIRED_SOP_HEADERS
 
 
 def _chunk_text(text: str, *, chunk_chars: int = 900, overlap_chars: int = 150) -> list[str]:
@@ -244,19 +514,28 @@ def retrieve_company_snippets(
 
 
 def get_groq_api_key() -> str | None:
+    """Resolve Groq API key from Streamlit secrets.toml (or env injected by Streamlit), then bare env."""
     try:
-        secret = st.secrets.get("GROQ_API_KEY")
-        if secret:
-            return secret
-    except Exception:
+        if "GROQ_API_KEY" in st.secrets:
+            k = _normalize_secret_value(st.secrets["GROQ_API_KEY"])
+            if k:
+                return k
+        if "groq" in st.secrets:
+            section = st.secrets["groq"]
+            if isinstance(section, Mapping) and "api_key" in section:
+                k = _normalize_secret_value(section["api_key"])
+                if k:
+                    return k
+    except StreamlitSecretNotFoundError:
         pass
 
-    return os.getenv("GROQ_API_KEY") or None
+    return _normalize_secret_value(os.getenv("GROQ_API_KEY"))
 
 
 COMPANY_PROFILE_PATH = os.path.join(".streamlit", "company_profile.json")
 FEEDBACK_PATH = os.path.join(".streamlit", "feedback.jsonl")
 HISTORY_PATH = os.path.join(".streamlit", "history.json")
+APP_LOG_PATH = os.path.join(".streamlit", "app.log")
 
 
 def load_company_profile() -> dict:
@@ -276,8 +555,22 @@ def save_company_profile(profile: dict) -> None:
         json.dump(profile, f, ensure_ascii=False, indent=2)
 
 
-def show_busy_error() -> None:
-    st.error("The system is busy. Please try again in a few seconds.")
+def log_exception(ex: Exception, *, context: str) -> None:
+    """Write exception details to a local log file for support/debugging."""
+    try:
+        os.makedirs(os.path.dirname(APP_LOG_PATH), exist_ok=True)
+        with open(APP_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.now(timezone.utc).isoformat()}] {context}\n")
+            f.write("".join(traceback.format_exception(type(ex), ex, ex.__traceback__)))
+    except Exception:
+        # Never let logging break the app UX.
+        pass
+
+
+def show_busy_error(ex: Exception | None = None, *, context: str = "Unhandled error") -> None:
+    if ex is not None:
+        log_exception(ex, context=context)
+    st.error("Something went wrong. Please try again. If this continues, contact support.")
 
 
 def append_feedback(entry: dict) -> None:
@@ -408,23 +701,16 @@ Common issues to avoid (from user feedback on previous SOPs):
         "Include tips, examples, and clarifying notes where helpful."
     )
 
-    section_lines = [
-        "- Purpose",
-        "- Scope",
-        "- Roles & responsibilities",
-        "- Procedure (numbered)",
-        "- Exceptions / edge cases",
-    ]
-    if include_definitions:
-        section_lines.append("- Definitions (only if needed)")
-    if include_records:
-        section_lines.append("- Records / documentation")
-    if include_safety_compliance:
-        section_lines.append("- Safety / compliance (if relevant)")
-    if include_checklist:
-        section_lines.append("- Checklist (short, at the end)")
-
-    sections_text = "\n".join(section_lines)
+    # System prompt requirement: strict Markdown headers in a fixed order.
+    # Keep this list in sync with prompt instructions below.
+    sections_text = "\n".join(
+        [
+            "1. Title",
+            "2. Purpose",
+            "3. Roles",
+            "4. Procedures",
+        ]
+    )
 
     notes_based_section = ""
     if len((notes or "").strip()) >= 1200:
@@ -445,7 +731,16 @@ If any manual rule conflicts with the user's notes, call out the conflict and ch
 
     return f"""
 Write a clear, professional Standard Operating Procedure (SOP) for the topic below.
-Use crisp headings and numbered steps. Keep it practical and immediately actionable.
+
+OUTPUT FORMAT (STRICT):
+- Output MUST be valid Markdown.
+- Use ONLY these H2 headers, in this exact order (spelling/case must match):
+  1) ## Title
+  2) ## Purpose
+  3) ## Roles
+  4) ## Procedures
+- Do NOT add any other headers (no extra ## sections).
+- Under "## Procedures" use a numbered list (1., 2., 3., ...).
 
 Target audience: {audience}
 Tools/systems used: {tools_used or "Not specified"}
@@ -459,7 +754,7 @@ Tone: {tone}
 
 {notes_based_section}
 
-Required sections (include ONLY these; omit all others):
+Required headers (include ONLY these; omit all others):
 {sections_text}
 
 Template-specific guidance:
@@ -491,6 +786,42 @@ def generate_sop_cached(
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
+def format_sop_to_required_markdown_cached(
+    *,
+    api_key: str,
+    model: str,
+    sop_text: str,
+) -> str:
+    """Reformat any SOP-ish text into the required strict Markdown structure."""
+    client = Groq(api_key=api_key)
+    prompt = f"""
+Reformat the SOP content below into STRICT valid Markdown using ONLY these H2 headers, in this exact order:
+1) ## Title
+2) ## Purpose
+3) ## Roles
+4) ## Procedures
+
+Rules:
+- Do not add any other headers (no extra ## sections).
+- Under "## Procedures" use a numbered list (1., 2., 3., ...).
+- Preserve factual content; if something is missing, write "Not specified".
+- Return ONLY the Markdown.
+
+SOP content:
+{sop_text}
+""".strip()
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a meticulous technical editor."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.0,
+    )
+    return completion.choices[0].message.content or ""
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=256)
 def review_and_fix_sop_cached(
     *,
     api_key: str,
@@ -513,6 +844,14 @@ Goals:
 - If there is a "Based on notes:" section, keep it and correct it to match the SOP (do not add new facts).
 
 Output rules:
+- Output MUST be valid Markdown.
+- Use ONLY these H2 headers, in this exact order (spelling/case must match):
+  1) ## Title
+  2) ## Purpose
+  3) ## Roles
+  4) ## Procedures
+- Do NOT add any other headers (no extra ## sections).
+- Under "## Procedures" use a numbered list (1., 2., 3., ...).
 - Return ONLY the revised SOP (no analysis, no bullet list of issues).
 - Use the same tone: {tone}
 - Use strictness: {strictness}
@@ -716,7 +1055,7 @@ Do not invent details; if unclear, say "Unclear in image".
     )
     return (completion.choices[0].message.content or "").strip()
 
-logo_url = render_svg_data_uri(SVG_CODE)
+logo_url = resolve_brand_logo_url(_brand)
 
 with st.sidebar:
     # Load profile once per session, then use it as widget defaults.
@@ -728,7 +1067,23 @@ with st.sidebar:
         st.session_state.profile_compliance = str(profile.get("compliance_standard", "") or "")
         st.session_state.profile_tone = str(profile.get("tone", "Professional") or "Professional")
 
-    st.image(logo_url, width=160)
+    st.markdown("## Professional Edition")
+
+    _has_custom_logo = bool(str(_brand.get("logo_url") or "").strip() or str(_brand.get("logo_path") or "").strip())
+    if _has_custom_logo:
+        st.image(logo_url, width=160)
+    else:
+        st.markdown(
+            """
+<div style="border: 1px dashed rgba(255,255,255,0.22); border-radius: 16px; padding: 18px; text-align: center; background: rgba(255,255,255,0.04);">
+  <div style="font-weight: 700; letter-spacing: 0.04em; opacity: 0.9;">LOGO</div>
+  <div style="margin-top: 6px; font-size: 12px; opacity: 0.7;">Upload / configure a logo</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(f"**{str(_brand.get('app_name') or DEFAULT_BRANDING['app_name'])}**")
     st.markdown("### How to use")
     st.info(
         "1. Enter a clear **Topic**.\n"
@@ -899,15 +1254,20 @@ header_left, header_right = st.columns([1, 6])
 with header_left:
     st.image(logo_url, width=70)
 with header_right:
-    st.title("Professional SOP Generator")
-    st.caption("Powered by Groq")
+    st.title(str(_brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
+    _tag = header_tagline(_brand)
+    if _tag:
+        st.caption(_tag)
 
 if "notes" not in st.session_state:
     st.session_state.notes = ""
 
 api_key = get_groq_api_key()
 if not api_key:
-    st.warning("Set `GROQ_API_KEY` in Streamlit secrets or as an environment variable to generate SOPs.")
+    st.warning(
+        "Set `GROQ_API_KEY` in `.streamlit/secrets.toml` (see `.streamlit/secrets.toml.example`) "
+        "or as the environment variable `GROQ_API_KEY` to generate SOPs."
+    )
 
 with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
     st.caption("Upload an audio file, transcribe it, then generate the SOP from the transcript.")
@@ -1035,6 +1395,8 @@ if generate:
                 )
                 st.session_state.last_sop_text = sop_text
                 st.session_state.last_inferred_topic = inferred_topic
+                # Always set the "current" SOP so it persists across any subsequent button clicks.
+                st.session_state.current_sop_text = sop_text
 
                 add_to_history(
                     {
@@ -1047,99 +1409,79 @@ if generate:
                     }
                 )
             except Exception as e:
-                show_busy_error()
+                show_busy_error(e, context="Generate SOP")
                 sop_text = ""
 
         if sop_text:
-            st.subheader("Generated SOP")
-            st.markdown(sop_text)
-
-            if "current_sop_text" not in st.session_state:
-                st.session_state.current_sop_text = sop_text
-
-            with st.expander("Interactive Step Editor (edit inside the app)", expanded=False):
-                st.caption("Edit the SOP here, then download the edited version.")
-                edited = st.text_area(
-                    "Edit SOP text",
-                    value=st.session_state.current_sop_text,
-                    height=320,
-                    key=f"editor_gen_{sop_fingerprint(sop_text)}",
-                )
-                col_e1, col_e2 = st.columns(2)
-                with col_e1:
-                    if st.button("Save edits", key=f"save_gen_{sop_fingerprint(sop_text)}"):
-                        st.session_state.current_sop_text = edited
-                        st.success("Edits saved. Downloads will use the edited SOP.")
-                with col_e2:
-                    if st.button("Reset to generated", key=f"reset_gen_{sop_fingerprint(sop_text)}"):
-                        st.session_state.current_sop_text = sop_text
-                        st.success("Reset to the generated SOP.")
-
-            sop_for_download = st.session_state.get("current_sop_text") or sop_text
-            safe_name = "".join(c for c in inferred_topic.strip() if c.isalnum() or c in (" ", "-", "_")).strip() or "sop"
-            try:
-                pdf_bytes = create_pdf_bytes(sop_for_download)
-                docx_bytes = create_docx_bytes(safe_name, sop_for_download)
-            except Exception:
-                pdf_bytes = b""
-                docx_bytes = b""
-                show_busy_error()
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if pdf_bytes:
-                    st.download_button(
-                        "Download PDF",
-                        data=pdf_bytes,
-                        file_name=f"{safe_name}.pdf",
-                        mime="application/pdf",
+            # Enforce strict Markdown structure. If the model drifts, auto-fix it once.
+            if not is_valid_sop_markdown(sop_text):
+                try:
+                    sop_text = format_sop_to_required_markdown_cached(
+                        api_key=api_key,
+                        model=model,
+                        sop_text=sop_text,
                     )
-            with col_b:
-                if docx_bytes:
-                    st.download_button(
-                        "Download DOCX",
-                        data=docx_bytes,
-                        file_name=f"{safe_name}.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    )
+                except Exception as e:
+                    show_busy_error(e, context="Format SOP to required Markdown")
 
-            st.markdown("### Rate this SOP")
-            rating = st.radio(
-                "Was this SOP helpful?",
-                ["👍 Thumbs Up", "👎 Thumbs Down"],
-                horizontal=True,
-                key=f"rating_{sop_fingerprint(sop_text)}",
+            st.session_state.last_sop_text = sop_text
+            st.session_state.current_sop_text = sop_text
+            st.success("SOP generated. See 'Current SOP' below.")
+
+
+# --- Persistent SOP display (state management) ---
+current_sop = (st.session_state.get("current_sop_text") or "").strip()
+if current_sop:
+    st.divider()
+    st.subheader("Current SOP")
+    st.markdown(current_sop)
+
+    inferred_topic = str(st.session_state.get("last_inferred_topic") or "sop")
+    safe_name = "".join(c for c in inferred_topic.strip() if c.isalnum() or c in (" ", "-", "_")).strip() or "sop"
+    try:
+        current_pdf = create_pdf_bytes(current_sop)
+        current_docx = create_docx_bytes(safe_name, current_sop)
+    except Exception as e:
+        current_pdf = b""
+        current_docx = b""
+        show_busy_error(e, context="Prepare current SOP downloads")
+
+    with st.expander("Edit SOP (client-ready)", expanded=False):
+        edited_current = st.text_area(
+            "Edit SOP text",
+            value=current_sop,
+            height=320,
+            key=f"editor_current_{sop_fingerprint(current_sop)}",
+        )
+        col_ec1, col_ec2 = st.columns(2)
+        with col_ec1:
+            if st.button("Save edits", key=f"save_current_{sop_fingerprint(current_sop)}"):
+                st.session_state.current_sop_text = edited_current
+                st.success("Edits saved.")
+        with col_ec2:
+            if st.button("Reset to last generated", key="reset_current_to_last"):
+                st.session_state.current_sop_text = st.session_state.get("last_sop_text", "") or current_sop
+                st.success("Reset.")
+
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        if current_pdf:
+            st.download_button(
+                "Download PDF",
+                data=current_pdf,
+                file_name=f"{safe_name}.pdf",
+                mime="application/pdf",
+                key=f"dl_pdf_current_{sop_fingerprint(current_sop)}",
             )
-            reason = ""
-            if rating.startswith("👎"):
-                reason = st.text_area(
-                    "What should be improved?",
-                    placeholder="e.g., missing roles, unclear steps, wrong order, missing records, too long/short...",
-                    key=f"reason_{sop_fingerprint(sop_text)}",
-                )
-            if st.button("Submit feedback", key=f"submit_{sop_fingerprint(sop_text)}"):
-                append_feedback(
-                    {
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "rating": "up" if rating.startswith("👍") else "down",
-                        "reason": reason.strip(),
-                        "template_name": template_name,
-                        "strictness": strictness,
-                        "tone": tone,
-                        "compliance_standard": compliance_standard or "",
-                        "audience": (audience or "").strip(),
-                        "tools_used": (tools_used or "").strip(),
-                        "include_definitions": bool(include_definitions),
-                        "include_safety_compliance": bool(include_safety_compliance),
-                        "include_records": bool(include_records),
-                        "include_checklist": bool(include_checklist),
-                        "model": model,
-                        "temperature": float(temperature),
-                        "notes_chars": len((notes or "").strip()),
-                        "sop_sha256": sop_fingerprint(sop_text),
-                    }
-                )
-                st.success("Thanks — feedback saved.")
+    with col_dl2:
+        if current_docx:
+            st.download_button(
+                "Download DOCX",
+                data=current_docx,
+                file_name=f"{safe_name}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"dl_docx_current_{sop_fingerprint(current_sop)}",
+            )
 
 
 # --- Step 2: Quality pass (Review & Fix) ---
@@ -1227,6 +1569,7 @@ if api_key and last_sop:
                     data=pdf_bytes,
                     file_name=f"{safe_name}-revised.pdf",
                     mime="application/pdf",
+                    key=f"dl_pdf_rev_{sop_fingerprint(sop_for_download)}",
                 )
         with col_d:
             if docx_bytes:
@@ -1235,6 +1578,7 @@ if api_key and last_sop:
                     data=docx_bytes,
                     file_name=f"{safe_name}-revised.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key=f"dl_docx_rev_{sop_fingerprint(sop_for_download)}",
                 )
 
         st.markdown("### Rate the revised SOP")
