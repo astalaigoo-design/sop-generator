@@ -169,6 +169,16 @@ def _database_url() -> str:
     return "sqlite+pysqlite:///./fluency.db"
 
 
+def _database_backend_label() -> str:
+    """Human-readable DB backend for smoke tests (no credentials)."""
+    u = _database_url().strip().lower()
+    if u.startswith("postgresql") or u.startswith("postgres"):
+        return "PostgreSQL"
+    if u.startswith("sqlite"):
+        return "SQLite (dev only)"
+    return "Database"
+
+
 def _coerce_int(value: object, default: int) -> int:
     try:
         if value is None:
@@ -571,6 +581,14 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
 
     st.title(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
     st.caption("Sign in or create your organization workspace.")
+
+    # Optional: set SHOW_DB_HINT=true in secrets during redeploy smoke tests (PostgreSQL vs SQLite).
+    try:
+        hint_raw = _secret_first("SHOW_DB_HINT", "SHOW_DEPLOYMENT_INFO")
+        if hint_raw is not None and str(hint_raw).strip() != "" and _coerce_bool(hint_raw, False):
+            st.caption(f"Deployment DB: **{_database_backend_label()}**")
+    except Exception:
+        pass
 
     with _db() as s:
         any_user = s.execute(select(User.id).limit(1)).scalar_one_or_none()
@@ -2284,6 +2302,7 @@ with st.sidebar:
     usage = usage_counts_today(tenant_id=tenant_id)
     with st.expander("Usage & quotas (today)", expanded=False):
         st.caption(f"Date: {_today_key()}")
+        st.caption(f"Database: {_database_backend_label()}")
         st.write(
             {
                 "generations_used": usage.get("generate", 0),
