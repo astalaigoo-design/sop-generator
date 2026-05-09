@@ -137,7 +137,7 @@ Use this before going live (Streamlit Cloud: **App settings → Secrets**; local
 | `SELF_SIGNUP_ENABLED` | No | Default **on**: “Create workspace” public signup. Set `false` for invite-only tenants. |
 | `DEBUG_ERRORS` | No | Leave **unset** or `false` in production; use `true` only while debugging. |
 | `APP_ACCESS_PASSWORD` | No | Optional extra gate **before** login; SaaS usually uses login only. |
-| `SESSION_COOKIE_SECRET` | **Recommended** (prod) | Long random string (e.g. `openssl rand -hex 32`). Enables a signed browser cookie so **a full page refresh** keeps the user signed in (Streamlit’s server session alone does not). Without this secret, users return to the login screen after refresh. |
+| `SESSION_COOKIE_SECRET` | **Recommended** (Cloud) | Long random string (e.g. `openssl rand -hex 32`). Enables a signed browser cookie so **a full page refresh** keeps the user signed in. **Streamlit Cloud:** set this in Secrets (no durable disk). **Local dev:** if unset, the app creates `.streamlit/.session_cookie_secret` once (gitignored) so refresh works without configuring anything. |
 | `SESSION_COOKIE_DAYS` | No | Sign-in cookie lifetime in days (default **30**, max **366**). |
 | `APP_LOG_PATH` | No | Overrides log file path (default uses system temp). |
 | `DEFAULT_*_PER_DAY` | No | Quota defaults for new tenants (`DEFAULT_GENERATIONS_PER_DAY`, etc.). |
