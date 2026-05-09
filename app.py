@@ -13,7 +13,8 @@ from io import BytesIO
 import streamlit.components.v1 as components
 import hashlib
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from secrets import token_urlsafe
 from pathlib import Path
 import traceback
 from fpdf import FPDF
@@ -23,7 +24,6 @@ from pypdf import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import difflib
-from datetime import date
 from passlib.context import CryptContext
 from passlib.hash import bcrypt as _bcrypt_hash
 from sqlalchemy import (
@@ -35,7 +35,9 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
@@ -292,6 +294,10 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(50), default="member")  # admin | reviewer | member
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Self-signup: False until magic-link verified (no SMTP — user opens link from dashboard message).
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=True)
+    verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
@@ -429,8 +435,33 @@ def _engine(database_url: str):
     return create_engine(url, **kw)
 
 
+def _migrate_user_verification_columns(engine) -> None:
+    """Add email verification columns to existing deployments (Neon/SQLite)."""
+    try:
+        insp = inspect(engine)
+        cols = {c["name"] for c in insp.get_columns("users")}
+    except Exception:
+        return
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if "email_verified" not in cols:
+            if dialect == "sqlite":
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT 1"))
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT TRUE"))
+        if "verification_token" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN verification_token VARCHAR(128)"))
+        if "verification_expires_at" not in cols:
+            if dialect == "sqlite":
+                conn.execute(text("ALTER TABLE users ADD COLUMN verification_expires_at TIMESTAMP"))
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN verification_expires_at TIMESTAMP WITH TIME ZONE"))
+
+
 def _init_db() -> None:
-    Base.metadata.create_all(_engine(_database_url()))
+    eng = _engine(_database_url())
+    Base.metadata.create_all(eng)
+    _migrate_user_verification_columns(eng)
 
 
 def _db() -> Session:
@@ -501,6 +532,7 @@ def _ensure_bootstrap_admin() -> None:
                 password_hash=_hash_password(pwd),
                 role="admin",
                 is_active=True,
+                email_verified=True,
             )
             s.add(u)
             s.commit()
@@ -531,32 +563,123 @@ def _sanitize_tenant_slug(raw: str) -> str:
     return (s[:118] if s else "workspace")
 
 
+def _signup_requires_email_verification() -> bool:
+    """Self-signup must verify via magic link (no SMTP). Set REQUIRE_EMAIL_VERIFICATION=false to skip."""
+    raw = _secret_first("REQUIRE_EMAIL_VERIFICATION", "EMAIL_VERIFICATION_REQUIRED")
+    if raw is None or str(raw).strip() == "":
+        return True
+    return _coerce_bool(raw, True)
+
+
+def _app_base_url() -> str:
+    return (_secret_first("APP_BASE_URL", "PUBLIC_URL") or "").rstrip("/")
+
+
+def _verification_url_for_token(token: str) -> str:
+    base = (_app_base_url() or "").strip().rstrip("/")
+    tok = (token or "").strip()
+    if not tok or not base:
+        return ""
+    return f"{base}?verify_token={tok}"
+
+
+def _consume_verification_token(raw_token: str) -> bool:
+    """Single-use magic link token (stored server-side)."""
+    tok = (raw_token or "").strip()
+    if not tok:
+        return False
+    if "verify_token=" in tok:
+        frag = tok.split("verify_token=", 1)[1].split("&")[0].split("#")[0].strip()
+        if frag:
+            tok = frag
+    _init_db()
+    now = datetime.now(timezone.utc)
+    try:
+        with _db() as s:
+            u = s.execute(select(User).where(User.verification_token == tok)).scalars().first()
+            if u is None:
+                return False
+            exp = u.verification_expires_at
+            if exp is not None and exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp is not None and exp < now:
+                return False
+            u.email_verified = True
+            u.verification_token = None
+            u.verification_expires_at = None
+            s.commit()
+        return True
+    except Exception as ex:
+        log_exception(ex, context="Consume verification token")
+        return False
+
+
+def _issue_new_verification_token(*, email: str) -> tuple[bool, str]:
+    """Regenerate token for an unverified user (still no SMTP — user must open link)."""
+    email_n = _normalize_email(email)
+    if not email_n:
+        return False, "Enter your email address."
+    hrs = _coerce_int(_secret_first("VERIFICATION_LINK_EXPIRY_HOURS"), 48)
+    if hrs < 1:
+        hrs = 48
+    _init_db()
+    try:
+        with _db() as s:
+            u = s.execute(select(User).where(User.email == email_n)).scalars().first()
+            if u is None:
+                return False, "No account found for that email."
+            if getattr(u, "email_verified", True) is True:
+                return False, "That email is already verified. Sign in."
+            tok = token_urlsafe(48)
+            u.verification_token = tok
+            u.verification_expires_at = datetime.now(timezone.utc) + timedelta(hours=hrs)
+            s.commit()
+        url = _verification_url_for_token(tok)
+        if url:
+            return True, url
+        return True, f"(Set APP_BASE_URL for a clickable link.) Append to your app URL: ?verify_token={tok}"
+    except Exception as ex:
+        log_exception(ex, context="Issue verification token")
+        return False, "Could not issue a new link. Try again."
+
+
 def register_workspace(
     *,
     slug_raw: str,
     display_name: str,
     email: str,
     password: str,
-) -> tuple[bool, str]:
-    """Create a new tenant + first admin (self-service signup)."""
+) -> tuple[bool, str, dict | None]:
+    """Create a new tenant + first admin (self-service signup).
+
+    Returns (ok, message, extra). When email verification is required, extra contains
+    verification_url / token for the magic-link flow (no SMTP).
+    """
     slug = _sanitize_tenant_slug(slug_raw)
     if len(slug) < 2:
-        return False, "Workspace URL must be at least 2 characters (letters or numbers)."
+        return False, "Workspace URL must be at least 2 characters (letters or numbers).", None
     name = (display_name or "").strip() or slug.replace("-", " ").title()
     email_n = _normalize_email(email)
     if not email_n:
-        return False, "Enter a valid email address."
+        return False, "Enter a valid email address.", None
     pw_n = _normalize_password_input(password)
     if len(pw_n) < 8:
-        return False, "Password must be at least 8 characters."
+        return False, "Password must be at least 8 characters.", None
+
+    verify_on = _signup_requires_email_verification()
+    hrs = _coerce_int(_secret_first("VERIFICATION_LINK_EXPIRY_HOURS"), 48)
+    if hrs < 1:
+        hrs = 48
+    vtok = token_urlsafe(48) if verify_on else None
+    vexp = (datetime.now(timezone.utc) + timedelta(hours=hrs)) if verify_on else None
 
     _init_db()
     try:
         with _db() as s:
             if s.execute(select(User.id).where(User.email == email_n)).scalar_one_or_none() is not None:
-                return False, "That email is already registered. Sign in instead."
+                return False, "That email is already registered. Sign in instead.", None
             if s.execute(select(Tenant.id).where(Tenant.slug == slug)).scalar_one_or_none() is not None:
-                return False, "That workspace URL is already taken. Choose another."
+                return False, "That workspace URL is already taken. Choose another.", None
 
             t = Tenant(slug=slug, name=name)
             s.add(t)
@@ -569,16 +692,32 @@ def register_workspace(
                     password_hash=_hash_password(pw_n),
                     role="admin",
                     is_active=True,
+                    email_verified=(False if verify_on else True),
+                    verification_token=vtok,
+                    verification_expires_at=vexp,
                 )
             )
             s.commit()
     except IntegrityError:
-        return False, "Workspace URL or email conflict. Try a different URL or sign in."
+        return False, "Workspace URL or email conflict. Try a different URL or sign in.", None
     except Exception as ex:
         log_exception(ex, context="Register workspace")
-        return False, "Could not create workspace. Try again or contact support."
+        return False, "Could not create workspace. Try again or contact support.", None
 
-    return True, "Workspace created. Sign in with your email and password."
+    if verify_on and vtok:
+        url = _verification_url_for_token(vtok)
+        msg = (
+            "Workspace created. Verify your email before signing in — open the magic link below "
+            "(no SMTP in-app; you can paste the link into your browser or send it to yourself from your mailbox)."
+        )
+        extra = {
+            "verification_url": url,
+            "verification_token": vtok,
+            "expires_hours": hrs,
+        }
+        return True, msg, extra
+
+    return True, "Workspace created. Sign in with your email and password.", None
 
 
 def _current_user() -> dict | None:
@@ -602,6 +741,25 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
     user = _current_user()
     if user:
         return
+
+    # Magic-link verification (?verify_token=...) — no SMTP; user opens link from on-screen instructions.
+    try:
+        qp = st.query_params
+        if "verify_token" in qp:
+            raw_tok = qp.get("verify_token")
+            if isinstance(raw_tok, list):
+                raw_tok = raw_tok[0]
+            if raw_tok:
+                if _consume_verification_token(str(raw_tok)):
+                    st.success("Email verified. You can sign in below.")
+                else:
+                    st.error("Invalid or expired verification link.")
+            try:
+                del st.query_params["verify_token"]
+            except Exception:
+                pass
+    except Exception as ex:
+        log_exception(ex, context="Verify token from URL")
 
     st.title(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
     st.caption("Sign in or create your organization workspace.")
@@ -644,6 +802,7 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                                 password_hash=_hash_password(pwd),
                                 role="admin",
                                 is_active=True,
+                                email_verified=True,
                             )
                             s.add(u)
                             s.commit()
@@ -674,6 +833,11 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                                     st.write({"reason": "no_user_for_email", "email": email_n})
                         elif u.is_active is False:
                             st.error("This account is disabled. Contact your administrator.")
+                        elif getattr(u, "email_verified", True) is False:
+                            st.error(
+                                "Email not verified yet. Open your verification link first, "
+                                "or use **Resend link** below."
+                            )
                         elif not u.password_hash or not str(u.password_hash).strip():
                             st.error("Account error: missing password hash. Reset password via admin or bootstrap.")
                             log_exception(
@@ -708,6 +872,31 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                 except Exception as e:
                     show_busy_error(e, context="Login")
 
+        with st.expander("Resend verification link"):
+            st.caption("If you created a workspace but did not finish verification, request a new link.")
+            with st.form("resend_verification"):
+                r_email = st.text_input("Your email", key="resend_v_email")
+                if st.form_submit_button("Issue new verification link"):
+                    ok_r, out = _issue_new_verification_token(email=r_email)
+                    if ok_r:
+                        if out.startswith("http"):
+                            st.markdown(f"[Open verification link]({out})")
+                            st.code(out, language=None)
+                        else:
+                            st.info(out)
+                    else:
+                        st.error(out)
+
+        with st.expander("Verify with token (manual)"):
+            st.caption("Paste the long token from your saved link, or type ?verify_token=… value.")
+            with st.form("manual_verify_token"):
+                raw_t = st.text_input("Verification token", type="password", key="manual_vtok")
+                if st.form_submit_button("Mark email as verified"):
+                    if _consume_verification_token(raw_t.strip()):
+                        st.success("Email verified. You can sign in above.")
+                    else:
+                        st.error("Invalid or expired token.")
+
     with tab_signup:
         if not signup_ok:
             st.info(
@@ -731,7 +920,7 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                     if su_pwd != su_pwd2:
                         st.error("Passwords do not match.")
                     else:
-                        ok, msg = register_workspace(
+                        ok, msg, extra = register_workspace(
                             slug_raw=ws_slug,
                             display_name=ws_name,
                             email=su_email,
@@ -739,6 +928,22 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                         )
                         if ok:
                             st.success(msg)
+                            if extra:
+                                url = (extra.get("verification_url") or "").strip()
+                                if url:
+                                    st.markdown(f"[Open verification link]({url})")
+                                    st.code(url, language=None)
+                                else:
+                                    st.warning(
+                                        "Set **`APP_BASE_URL`** in Streamlit secrets (your app URL, no trailing slash) "
+                                        "to generate a full link. Until then, append this to your browser:"
+                                    )
+                                    tok = extra.get("verification_token") or ""
+                                    st.code(f"?verify_token={tok}", language=None)
+                                st.caption(
+                                    f"Link expires in ~{extra.get('expires_hours', 48)} hours. "
+                                    "Optional: send yourself this URL via email from your own mailbox."
+                                )
                         else:
                             st.error(msg)
     st.stop()
@@ -1787,6 +1992,7 @@ def create_user(
                 password_hash=_hash_password(password),
                 role=role_n,
                 is_active=True,
+                email_verified=True,
             )
         )
         s.commit()
