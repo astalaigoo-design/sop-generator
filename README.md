@@ -30,6 +30,31 @@ By default, the login screen has **Create workspace**: visitors can register a n
 SELF_SIGNUP_ENABLED = false
 ```
 
+### Email verification (magic link, no SMTP)
+
+Open signup is easy to abuse with fake tenants. By default, **new workspace admins must verify email** before they can sign in: after **Create workspace**, they open a **magic link** once (same tab as the app). No in-app SMTP — users copy the link from the success screen or send it to themselves.
+
+Configure in secrets:
+
+```toml
+# Canonical app URL for clickable links (Streamlit Cloud: https://your-app.streamlit.app)
+APP_BASE_URL = "https://your-app.streamlit.app"
+
+# Default true when unset — set false only for trusted / internal deployments
+REQUIRE_EMAIL_VERIFICATION = true
+
+# How long each verification token stays valid (hours)
+VERIFICATION_LINK_EXPIRY_HOURS = 48
+```
+
+`PUBLIC_URL` is accepted as an alias for `APP_BASE_URL`. If `APP_BASE_URL` is missing, the app still shows the raw `?verify_token=…` fragment and **Sign in → Verify with token (manual)** accepts the token or a pasted full URL.
+
+To turn off verification entirely (not recommended on the public internet):
+
+```toml
+REQUIRE_EMAIL_VERIFICATION = false
+```
+
 ### SaaS mode (recommended)
 
 For client deployments, use a real database and login instead of a shared password.
@@ -142,7 +167,7 @@ After you push the latest code (including the self-signup default fix):
 1. **Streamlit Cloud** → your app → **Reboot** (or trigger a new deploy from Git).
 2. In **Secrets**, confirm **`DATABASE_URL`** is your Neon Postgres URL (not empty). Optional: add `SHOW_DB_HINT = true` temporarily — the login page will show **Deployment DB: PostgreSQL** (remove after testing).
 3. Open the app URL. You should see **Sign in** and **Create workspace** (unless `SELF_SIGNUP_ENABLED = false`).
-4. **Create workspace**: use a new workspace URL, org name, email, password (8+ chars). Submit → you should see success; then **Sign in** with the same email and password.
+4. **Create workspace**: use a new workspace URL, org name, email, password (8+ chars). Submit → you should see a **verification link** (with **`APP_BASE_URL`** set in Secrets) or a `?verify_token=…` line. Open the link **or** use **Sign in → Verify with token** once; then **Sign in** with the same email and password. Until verified, sign-in shows “Email not verified”.
 5. After login, open the sidebar **Usage & quotas** expander — it shows **Database: PostgreSQL** when `DATABASE_URL` is set. If it says **SQLite (dev only)**, Cloud is not using Neon (check secrets and reboot).
 6. In **Neon** (dashboard / query), confirm new rows in your tables (e.g. `tenants`, `users`) after signup.
 7. Set **`SHOW_DB_HINT = false`** or remove it, and keep **`DEBUG_ERRORS`** off in production.
