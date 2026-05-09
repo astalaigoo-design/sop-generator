@@ -149,9 +149,9 @@ After you push the latest code (including the self-signup default fix):
 
 ## Troubleshooting login (“Invalid email or password”)
 
-- **Stale DB connection (fixed in latest code):** The SQLAlchemy engine was cached without `DATABASE_URL`, so the app could keep using **SQLite** after you added Neon. **Pull latest**, redeploy, set **`DATABASE_URL`**, then **reboot** the app. In the sidebar **Usage & quotas** expander, confirm **Database: PostgreSQL** (not SQLite).
+- **Wrong database (common):** The app caches one SQLAlchemy engine **per `DATABASE_URL`**. After adding or changing Neon `DATABASE_URL`, **redeploy/reboot** the app so new connections use Postgres. Check sidebar **Usage & quotas → Database:** — it must say **PostgreSQL**, not **SQLite (dev only)** on Cloud.
 - Use the **same email** you registered with (check spelling; emails are stored lowercase).
-- Passwords are **trimmed** when checking—accidental leading/trailing spaces from paste should no longer break login.
+- Passwords are **trimmed** when checking; legacy passwords saved without trimming are still accepted when needed.
 - Sign-up on **Streamlit Cloud + Neon** is a **different database** than local SQLite: accounts created locally do not exist in Neon until you create them there.
 - If your admin was created with **bootstrap secrets**, sign in with **`BOOTSTRAP_ADMIN_EMAIL`** / **`BOOTSTRAP_ADMIN_PASSWORD`** exactly as in Secrets (after trimming).
 - Temporary diagnostics: add **`DEBUG_LOGIN = true`** to Streamlit Secrets, retry sign-in, open the **Login debug** expander (then remove the secret).
