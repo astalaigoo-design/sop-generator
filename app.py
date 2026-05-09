@@ -730,10 +730,40 @@ def _current_user() -> dict | None:
     return st.session_state.get("auth_user")
 
 
-def _session_cookie_secret_raw() -> str | None:
+def _session_cookie_secret_explicit() -> str | None:
     return _normalize_secret_value(
         _secret_first("SESSION_COOKIE_SECRET", "FLUENCY_SESSION_SECRET")
     )
+
+
+def _session_cookie_secret_effective() -> str | None:
+    """Secret for signing session cookies: explicit `SESSION_COOKIE_SECRET`, else auto local file.
+
+    Streamlit Cloud must set `SESSION_COOKIE_SECRET` (filesystem is not durable).
+    Local dev: writes `.streamlit/.session_cookie_secret` once so refresh works without manual setup.
+    """
+    ex = _session_cookie_secret_explicit()
+    if ex:
+        return ex
+    path = os.path.join(".streamlit", ".session_cookie_secret")
+    try:
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                s = _normalize_secret_value(f.read())
+                if s:
+                    return s
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tok = token_urlsafe(48)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(tok)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        return tok
+    except OSError:
+        return None
 
 
 def _session_cookie_max_age_seconds() -> int:
@@ -742,7 +772,7 @@ def _session_cookie_max_age_seconds() -> int:
 
 
 def _sign_session_token(user_id: int) -> str:
-    secret = _session_cookie_secret_raw()
+    secret = _session_cookie_secret_effective()
     if not secret:
         return ""
     exp = int(time.time()) + _session_cookie_max_age_seconds()
@@ -754,7 +784,7 @@ def _sign_session_token(user_id: int) -> str:
 
 
 def _verify_session_token(token: str) -> int | None:
-    secret = _session_cookie_secret_raw()
+    secret = _session_cookie_secret_effective()
     if not secret or not (token or "").strip():
         return None
     parts = token.strip().split(".")
@@ -776,7 +806,36 @@ def _verify_session_token(token: str) -> int | None:
         return None
 
 
-def _session_cookie_from_request() -> str | None:
+def _cookie_header_session_value() -> str | None:
+    """Parse Cookie header (often populated when st.context.cookies is empty)."""
+    try:
+        h = getattr(st.context, "headers", None)
+        if h is None:
+            return None
+        raw = h.get("cookie") or h.get("Cookie")
+        if not raw:
+            return None
+        target = SESSION_COOKIE_NAME.lower()
+        for segment in str(raw).split(";"):
+            segment = segment.strip()
+            if "=" not in segment:
+                continue
+            k, v = segment.split("=", 1)
+            if k.strip().lower() != target:
+                continue
+            out = v.strip().strip('"')
+            try:
+                from urllib.parse import unquote
+
+                return unquote(out)
+            except Exception:
+                return out
+    except Exception:
+        pass
+    return None
+
+
+def _session_cookie_from_st_context_dict() -> str | None:
     try:
         ctx = getattr(st, "context", None)
         if ctx is None:
@@ -784,13 +843,38 @@ def _session_cookie_from_request() -> str | None:
         cookies = getattr(ctx, "cookies", None)
         if not cookies:
             return None
-        if hasattr(cookies, "get"):
-            v = cookies.get(SESSION_COOKIE_NAME)
-            if v:
-                return str(v)
+        for name in (SESSION_COOKIE_NAME, SESSION_COOKIE_NAME.lower()):
+            if hasattr(cookies, "get"):
+                v = cookies.get(name)
+                if v:
+                    return str(v)
+        if hasattr(cookies, "items"):
+            for k, v in cookies.items():
+                if str(k).lower() == SESSION_COOKIE_NAME.lower() and v:
+                    return str(v)
         return None
     except Exception:
         return None
+
+
+def _session_cookie_token_raw() -> str | None:
+    """Resolve session token: HTTP Cookie header, then st.context.cookies, then CookieManager."""
+    t = _cookie_header_session_value()
+    if t:
+        return t
+    t = _session_cookie_from_st_context_dict()
+    if t:
+        return t
+    mgr = _cookie_manager_singleton()
+    if mgr:
+        try:
+            mgr.get_all(key="fluency_ck_sync")
+            v = mgr.get(SESSION_COOKIE_NAME)
+            if v:
+                return str(v)
+        except Exception:
+            pass
+    return None
 
 
 def _request_is_https() -> bool:
@@ -820,10 +904,20 @@ def _persist_session_cookie_js_fallback(token: str, max_age: int) -> None:
     safe = json.dumps(token)
     components.html(
         f"""<script>
-const t = {safe};
-let s = "{SESSION_COOKIE_NAME}=" + encodeURIComponent(t) + "; path=/; max-age=" + {int(max_age)} + "; SameSite=Lax";
-if (location.protocol === "https:") s += "; Secure";
-try {{ document.cookie = s; }} catch (e) {{}}
+(function() {{
+  const t = {safe};
+  let s = "{SESSION_COOKIE_NAME}=" + encodeURIComponent(t) + "; path=/; max-age=" + {int(max_age)} + "; SameSite=Lax";
+  if (location.protocol === "https:") s += "; Secure";
+  function apply(doc) {{
+    try {{ doc.cookie = s; }} catch (e) {{}}
+  }}
+  apply(document);
+  try {{
+    if (window.parent && window.parent !== window && window.parent.document) {{
+      apply(window.parent.document);
+    }}
+  }} catch (e) {{}}
+}})();
 </script>""",
         height=0,
         width=0,
@@ -843,7 +937,7 @@ try {{
 
 
 def _persist_session_cookie(user_id: int) -> None:
-    if not _session_cookie_secret_raw():
+    if not _session_cookie_secret_effective():
         return
     tok = _sign_session_token(user_id)
     if not tok:
@@ -864,7 +958,8 @@ def _persist_session_cookie(user_id: int) -> None:
             )
         except Exception as ex:
             log_exception(ex, context="CookieManager.set session")
-            _persist_session_cookie_js_fallback(tok, ma)
+        # Always mirror via JS: iframe + top-frame so the browser sends Cookie on the next request.
+        _persist_session_cookie_js_fallback(tok, ma)
     else:
         _persist_session_cookie_js_fallback(tok, ma)
 
@@ -882,9 +977,9 @@ def _clear_persistent_auth_cookie() -> None:
 def _restore_auth_from_signed_cookie() -> None:
     if st.session_state.get("auth_user"):
         return
-    if not _session_cookie_secret_raw():
+    if not _session_cookie_secret_effective():
         return
-    raw = _session_cookie_from_request()
+    raw = _session_cookie_token_raw()
     if not raw:
         return
     uid = _verify_session_token(raw)
