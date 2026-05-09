@@ -21,6 +21,21 @@ from docx import Document
 from pypdf import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import difflib
+from datetime import date
+from passlib.context import CryptContext
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    select,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 
 DEFAULT_BRANDING: dict[str, object] = {
@@ -77,11 +92,332 @@ def _secret_or_env(name: str) -> str | None:
     try:
         if name in st.secrets:
             return _normalize_secret_value(st.secrets[name])
-    except StreamlitSecretNotFoundError:
+    except (StreamlitSecretNotFoundError, OSError, PermissionError):
         pass
     if name in _LOCAL_SECRETS:
         return _normalize_secret_value(_LOCAL_SECRETS.get(name))
     return _normalize_secret_value(os.getenv(name))
+
+
+def _database_url() -> str:
+    """Database connection string.
+
+    - SaaS/prod: set DATABASE_URL (e.g. Postgres).
+    - Local dev: defaults to a local sqlite file.
+    """
+    url = _secret_or_env("DATABASE_URL")
+    if url:
+        return url
+    return "sqlite+pysqlite:///./fluency.db"
+
+
+def _coerce_int(value: object, default: int) -> int:
+    try:
+        if value is None:
+            return default
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+_PWD = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Tenant(Base):
+    __tablename__ = "tenants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    users: Mapped[list["User"]] = relationship(back_populates="tenant")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    password_hash: Mapped[str] = mapped_column(String(512))
+    role: Mapped[str] = mapped_column(String(50), default="member")  # admin | reviewer | member
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="users")
+
+
+class TenantSettings(Base):
+    __tablename__ = "tenant_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), unique=True, index=True)
+    audience: Mapped[str] = mapped_column(String(500), default="")
+    tools_used: Mapped[str] = mapped_column(String(700), default="")
+    compliance_standard: Mapped[str] = mapped_column(String(120), default="")
+    tone: Mapped[str] = mapped_column(String(120), default="Professional")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class SopDoc(Base):
+    __tablename__ = "sop_docs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    title: Mapped[str] = mapped_column(String(300), default="SOP")
+    template_name: Mapped[str] = mapped_column(String(120), default="IT SOP")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    versions: Mapped[list["SopVersion"]] = relationship(back_populates="doc", cascade="all, delete-orphan")
+
+
+class SopVersion(Base):
+    __tablename__ = "sop_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    sop_doc_id: Mapped[int] = mapped_column(ForeignKey("sop_docs.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(30), default="draft")  # draft | in_review | approved
+    label: Mapped[str] = mapped_column(String(300), default="")
+    source: Mapped[str] = mapped_column(String(30), default="generated")  # generated | revised | edited
+    sop_text: Mapped[str] = mapped_column(Text)
+    sop_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    change_note: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    doc: Mapped["SopDoc"] = relationship(back_populates="versions")
+
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    rating: Mapped[str] = mapped_column(String(10))  # up | down
+    reason: Mapped[str] = mapped_column(Text, default="")
+    template_name: Mapped[str] = mapped_column(String(120), default="")
+    strictness: Mapped[str] = mapped_column(String(30), default="")
+    tone: Mapped[str] = mapped_column(String(60), default="")
+    compliance_standard: Mapped[str] = mapped_column(String(120), default="")
+    audience: Mapped[str] = mapped_column(String(500), default="")
+    tools_used: Mapped[str] = mapped_column(String(700), default="")
+    include_definitions: Mapped[bool] = mapped_column(Boolean, default=False)
+    include_safety_compliance: Mapped[bool] = mapped_column(Boolean, default=False)
+    include_records: Mapped[bool] = mapped_column(Boolean, default=False)
+    include_checklist: Mapped[bool] = mapped_column(Boolean, default=False)
+    model: Mapped[str] = mapped_column(String(120), default="")
+    temperature: Mapped[int] = mapped_column(Integer, default=0)  # store temp*100 for simplicity
+    notes_chars: Mapped[int] = mapped_column(Integer, default=0)
+    sop_sha256: Mapped[str] = mapped_column(String(64), default="")
+    source: Mapped[str] = mapped_column(String(30), default="")
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ManualDoc(Base):
+    __tablename__ = "manual_docs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(260))
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    chunks: Mapped[list["ManualChunk"]] = relationship(back_populates="doc", cascade="all, delete-orphan")
+
+
+class ManualChunk(Base):
+    __tablename__ = "manual_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    manual_doc_id: Mapped[int] = mapped_column(ForeignKey("manual_docs.id"), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+
+    doc: Mapped["ManualDoc"] = relationship(back_populates="chunks")
+
+
+class TenantQuota(Base):
+    __tablename__ = "tenant_quotas"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), unique=True, index=True)
+    generations_per_day: Mapped[int] = mapped_column(Integer, default=50)
+    transcriptions_per_day: Mapped[int] = mapped_column(Integer, default=50)
+    vision_analyses_per_day: Mapped[int] = mapped_column(Integer, default=50)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class DailyUsage(Base):
+    __tablename__ = "daily_usage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)  # YYYY-MM-DD
+    action: Mapped[str] = mapped_column(String(40), index=True)  # generate | transcribe | vision
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+@st.cache_resource
+def _engine():
+    url = _database_url()
+    # Avoid noisy check_same_thread issues for sqlite under Streamlit.
+    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    return create_engine(url, pool_pre_ping=True, connect_args=connect_args)
+
+
+def _init_db() -> None:
+    eng = _engine()
+    Base.metadata.create_all(eng)
+
+
+def _db() -> Session:
+    return Session(_engine())
+
+
+def _normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def _ensure_bootstrap_admin() -> None:
+    """Ensure the very first admin exists (one-time bootstrap).
+
+    Uses secrets/env:
+    - BOOTSTRAP_TENANT_SLUG
+    - BOOTSTRAP_TENANT_NAME
+    - BOOTSTRAP_ADMIN_EMAIL
+    - BOOTSTRAP_ADMIN_PASSWORD
+    """
+    with _db() as s:
+        any_user = s.execute(select(User.id).limit(1)).scalar_one_or_none()
+        if any_user is not None:
+            return
+
+        slug = (_secret_or_env("BOOTSTRAP_TENANT_SLUG") or "default").strip()
+        name = (_secret_or_env("BOOTSTRAP_TENANT_NAME") or "Default Tenant").strip()
+        email = _normalize_email(_secret_or_env("BOOTSTRAP_ADMIN_EMAIL") or "")
+        pwd = _secret_or_env("BOOTSTRAP_ADMIN_PASSWORD") or ""
+
+        if not email or not pwd:
+            return
+
+        t = Tenant(slug=slug, name=name)
+        s.add(t)
+        s.flush()
+
+        u = User(tenant_id=t.id, email=email, password_hash=_PWD.hash(pwd), role="admin", is_active=True)
+        s.add(u)
+        s.add(TenantSettings(tenant_id=t.id))
+        # Default quotas (override via env/secrets at runtime if desired)
+        s.add(
+            TenantQuota(
+                tenant_id=t.id,
+                generations_per_day=_coerce_int(_secret_or_env("DEFAULT_GENERATIONS_PER_DAY"), 50),
+                transcriptions_per_day=_coerce_int(_secret_or_env("DEFAULT_TRANSCRIPTIONS_PER_DAY"), 50),
+                vision_analyses_per_day=_coerce_int(_secret_or_env("DEFAULT_VISION_PER_DAY"), 50),
+            )
+        )
+        s.commit()
+
+
+def _login_required() -> bool:
+    return not _coerce_bool(_secret_or_env("AUTH_DISABLED"), False)
+
+
+def _current_user() -> dict | None:
+    return st.session_state.get("auth_user")
+
+
+def _require_auth_ui(brand: dict[str, object]) -> None:
+    """Login screen + optional bootstrap setup."""
+    if not _login_required():
+        st.session_state.auth_user = {
+            "user_id": None,
+            "tenant_id": None,
+            "email": "anonymous",
+            "role": "admin",
+        }
+        return
+
+    _init_db()
+    _ensure_bootstrap_admin()
+
+    user = _current_user()
+    if user:
+        return
+
+    st.title(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
+    st.caption("Sign in to continue.")
+
+    # If still no users exist, allow interactive bootstrap.
+    with _db() as s:
+        any_user = s.execute(select(User.id).limit(1)).scalar_one_or_none()
+
+    if any_user is None:
+        st.warning("No admin user exists yet. Create the first admin for this workspace.")
+        with st.form("bootstrap_admin"):
+            tenant_slug = st.text_input("Tenant slug", value="default")
+            tenant_name = st.text_input("Tenant name", value="Default Tenant")
+            email = st.text_input("Admin email")
+            pwd = st.text_input("Admin password", type="password")
+            if st.form_submit_button("Create admin"):
+                email_n = _normalize_email(email)
+                if not tenant_slug.strip() or not email_n or not pwd:
+                    st.error("Tenant slug, email, and password are required.")
+                else:
+                    try:
+                        with _db() as s:
+                            t = Tenant(slug=tenant_slug.strip(), name=tenant_name.strip() or tenant_slug.strip())
+                            s.add(t)
+                            s.flush()
+                            u = User(
+                                tenant_id=t.id,
+                                email=email_n,
+                                password_hash=_PWD.hash(pwd),
+                                role="admin",
+                                is_active=True,
+                            )
+                            s.add(u)
+                            s.add(TenantSettings(tenant_id=t.id))
+                            s.commit()
+                        st.success("Admin created. Please sign in.")
+                    except Exception as e:
+                        show_busy_error(e, context="Bootstrap admin")
+        st.stop()
+
+    with st.form("login"):
+        email = st.text_input("Email")
+        pwd = st.text_input("Password", type="password")
+        if st.form_submit_button("Sign in"):
+            try:
+                email_n = _normalize_email(email)
+                with _db() as s:
+                    u = s.execute(select(User).where(User.email == email_n, User.is_active == True)).scalar_one_or_none()
+                    if u is None or not _PWD.verify(pwd, u.password_hash):
+                        st.error("Invalid email or password.")
+                    else:
+                        st.session_state.auth_user = {
+                            "user_id": u.id,
+                            "tenant_id": u.tenant_id,
+                            "email": u.email,
+                            "role": u.role,
+                        }
+                        st.rerun()
+            except Exception as e:
+                show_busy_error(e, context="Login")
+    st.stop()
 
 
 def _optional_access_gate(brand: dict[str, object]) -> None:
@@ -147,7 +483,7 @@ def _branding_from_streamlit_secrets() -> dict[str, object]:
         if "branding" not in st.secrets:
             return {}
         sec = st.secrets["branding"]
-    except StreamlitSecretNotFoundError:
+    except (StreamlitSecretNotFoundError, OSError, PermissionError):
         return {}
     if not isinstance(sec, Mapping):
         return {}
@@ -365,6 +701,15 @@ st.markdown(build_branding_css(_brand), unsafe_allow_html=True)
 
 _optional_access_gate(_brand)
 
+# SaaS auth gate (preferred over shared password for client deployments)
+_require_auth_ui(_brand)
+
+# Convenience globals for downstream actions (generation, feedback, etc.)
+_auth = _current_user() or {}
+TENANT_ID: int | None = _auth.get("tenant_id")
+USER_ID: int | None = _auth.get("user_id")
+USER_ROLE: str = str(_auth.get("role") or "member")
+
 def create_pdf_bytes(text):
     pdf = FPDF()
     pdf.add_page()
@@ -532,27 +877,59 @@ def get_groq_api_key() -> str | None:
     return _normalize_secret_value(os.getenv("GROQ_API_KEY"))
 
 
-COMPANY_PROFILE_PATH = os.path.join(".streamlit", "company_profile.json")
-FEEDBACK_PATH = os.path.join(".streamlit", "feedback.jsonl")
-HISTORY_PATH = os.path.join(".streamlit", "history.json")
 APP_LOG_PATH = os.path.join(".streamlit", "app.log")
 
 
-def load_company_profile() -> dict:
+def load_company_profile(*, tenant_id: int | None) -> dict:
+    if tenant_id is None:
+        return {}
     try:
-        if not os.path.exists(COMPANY_PROFILE_PATH):
-            return {}
-        with open(COMPANY_PROFILE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
+        _init_db()
+        with _db() as s:
+            row = s.execute(select(TenantSettings).where(TenantSettings.tenant_id == tenant_id)).scalar_one_or_none()
+            if row is None:
+                row = TenantSettings(tenant_id=tenant_id)
+                s.add(row)
+                s.commit()
+            # Ensure quotas row exists too (non-blocking)
+            q = s.execute(select(TenantQuota).where(TenantQuota.tenant_id == tenant_id)).scalar_one_or_none()
+            if q is None:
+                s.add(
+                    TenantQuota(
+                        tenant_id=tenant_id,
+                        generations_per_day=_coerce_int(_secret_or_env("DEFAULT_GENERATIONS_PER_DAY"), 50),
+                        transcriptions_per_day=_coerce_int(_secret_or_env("DEFAULT_TRANSCRIPTIONS_PER_DAY"), 50),
+                        vision_analyses_per_day=_coerce_int(_secret_or_env("DEFAULT_VISION_PER_DAY"), 50),
+                    )
+                )
+                s.commit()
+            return {
+                "audience": row.audience or "",
+                "tools_used": row.tools_used or "",
+                "compliance_standard": row.compliance_standard or "",
+                "tone": row.tone or "Professional",
+            }
+    except Exception as e:
+        log_exception(e, context="Load tenant settings")
         return {}
 
 
-def save_company_profile(profile: dict) -> None:
-    os.makedirs(os.path.dirname(COMPANY_PROFILE_PATH), exist_ok=True)
-    with open(COMPANY_PROFILE_PATH, "w", encoding="utf-8") as f:
-        json.dump(profile, f, ensure_ascii=False, indent=2)
+def save_company_profile(*, tenant_id: int | None, profile: dict) -> None:
+    if tenant_id is None:
+        return
+    _init_db()
+    with _db() as s:
+        row = s.execute(select(TenantSettings).where(TenantSettings.tenant_id == tenant_id)).scalar_one_or_none()
+        if row is None:
+            row = TenantSettings(tenant_id=tenant_id)
+            s.add(row)
+            s.flush()
+        row.audience = str(profile.get("audience", "") or "")
+        row.tools_used = str(profile.get("tools_used", "") or "")
+        row.compliance_standard = str(profile.get("compliance_standard", "") or "")
+        row.tone = str(profile.get("tone", "Professional") or "Professional")
+        row.updated_at = datetime.now(timezone.utc)
+        s.commit()
 
 
 def log_exception(ex: Exception, *, context: str) -> None:
@@ -573,65 +950,595 @@ def show_busy_error(ex: Exception | None = None, *, context: str = "Unhandled er
     st.error("Something went wrong. Please try again. If this continues, contact support.")
 
 
-def append_feedback(entry: dict) -> None:
-    os.makedirs(os.path.dirname(FEEDBACK_PATH), exist_ok=True)
-    with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-
-def load_recent_feedback(limit: int = 50) -> list[dict]:
+def append_feedback(*, tenant_id: int | None, entry: dict) -> None:
+    if tenant_id is None:
+        return
     try:
-        if not os.path.exists(FEEDBACK_PATH):
-            return []
-        with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        _init_db()
+        temp100 = int(round(float(entry.get("temperature", 0.0)) * 100))
+        with _db() as s:
+            s.add(
+                Feedback(
+                    tenant_id=tenant_id,
+                    ts=datetime.fromisoformat(entry.get("ts")) if entry.get("ts") else datetime.now(timezone.utc),
+                    rating=str(entry.get("rating") or ""),
+                    reason=str(entry.get("reason") or ""),
+                    template_name=str(entry.get("template_name") or ""),
+                    strictness=str(entry.get("strictness") or ""),
+                    tone=str(entry.get("tone") or ""),
+                    compliance_standard=str(entry.get("compliance_standard") or ""),
+                    audience=str(entry.get("audience") or ""),
+                    tools_used=str(entry.get("tools_used") or ""),
+                    include_definitions=bool(entry.get("include_definitions")),
+                    include_safety_compliance=bool(entry.get("include_safety_compliance")),
+                    include_records=bool(entry.get("include_records")),
+                    include_checklist=bool(entry.get("include_checklist")),
+                    model=str(entry.get("model") or ""),
+                    temperature=temp100,
+                    notes_chars=_coerce_int(entry.get("notes_chars"), 0),
+                    sop_sha256=str(entry.get("sop_sha256") or ""),
+                    source=str(entry.get("source") or ""),
+                    meta={k: v for k, v in entry.items() if k not in {"ts", "rating", "reason"}},
+                )
+            )
+            s.commit()
+    except Exception as e:
+        log_exception(e, context="Append feedback")
+
+
+def load_recent_feedback(*, tenant_id: int | None, limit: int = 50) -> list[dict]:
+    if tenant_id is None:
+        return []
+    try:
+        _init_db()
+        with _db() as s:
+            rows = (
+                s.execute(
+                    select(Feedback)
+                    .where(Feedback.tenant_id == tenant_id)
+                    .order_by(Feedback.ts.desc())
+                    .limit(int(limit))
+                )
+                .scalars()
+                .all()
+            )
         out: list[dict] = []
-        for line in lines[-limit:]:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    out.append(obj)
-            except Exception:
-                continue
+        for r in rows[::-1]:
+            out.append(
+                {
+                    "ts": r.ts.isoformat(),
+                    "rating": r.rating,
+                    "reason": r.reason,
+                    "template_name": r.template_name,
+                    "strictness": r.strictness,
+                    "tone": r.tone,
+                    "compliance_standard": r.compliance_standard,
+                    "audience": r.audience,
+                    "tools_used": r.tools_used,
+                    "include_definitions": r.include_definitions,
+                    "include_safety_compliance": r.include_safety_compliance,
+                    "include_records": r.include_records,
+                    "include_checklist": r.include_checklist,
+                    "model": r.model,
+                    "temperature": (r.temperature or 0) / 100.0,
+                    "notes_chars": r.notes_chars,
+                    "sop_sha256": r.sop_sha256,
+                    "source": r.source,
+                    **(r.meta or {}),
+                }
+            )
         return out
-    except Exception:
+    except Exception as e:
+        log_exception(e, context="Load feedback")
         return []
 
 
-def load_history() -> list[dict]:
+def load_history(*, tenant_id: int | None, limit: int = 5) -> list[dict]:
+    if tenant_id is None:
+        return []
     try:
-        if not os.path.exists(HISTORY_PATH):
-            return []
-        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except Exception:
+        _init_db()
+        with _db() as s:
+            rows = (
+                s.execute(
+                    select(SopVersion)
+                    .where(SopVersion.tenant_id == tenant_id)
+                    .order_by(SopVersion.created_at.desc())
+                    .limit(int(limit))
+                )
+                .scalars()
+                .all()
+            )
+        out: list[dict] = []
+        for r in rows:
+            out.append(
+                {
+                    "id": r.id,
+                    "ts": r.created_at.isoformat(),
+                    "label": r.label,
+                    "template_name": "",
+                    "source": r.source,
+                    "sop_text": r.sop_text,
+                    "sop_sha256": r.sop_sha256,
+                    "status": r.status,
+                    "sop_doc_id": r.sop_doc_id,
+                    "version": r.version,
+                }
+            )
+        return out
+    except Exception as e:
+        log_exception(e, context="Load history")
         return []
+
+
+def load_doc_versions(*, tenant_id: int | None, sop_doc_id: int, limit: int = 25) -> list[dict]:
+    if tenant_id is None:
+        return []
+    _init_db()
+    with _db() as s:
+        rows = (
+            s.execute(
+                select(SopVersion)
+                .where(SopVersion.tenant_id == tenant_id, SopVersion.sop_doc_id == int(sop_doc_id))
+                .order_by(SopVersion.version.desc())
+                .limit(int(limit))
+            )
+            .scalars()
+            .all()
+        )
+    out: list[dict] = []
+    for r in rows:
+        out.append(
+            {
+                "id": r.id,
+                "version": r.version,
+                "status": r.status,
+                "ts": r.created_at.isoformat(),
+                "source": r.source,
+                "change_note": r.change_note,
+                "sop_text": r.sop_text,
+            }
+        )
+    return out
+
+
+def diff_text(a: str, b: str) -> str:
+    a_lines = (a or "").splitlines(keepends=True)
+    b_lines = (b or "").splitlines(keepends=True)
+    return "".join(difflib.unified_diff(a_lines, b_lines, fromfile="version_a", tofile="version_b"))
+
+def _today_key() -> str:
+    return date.today().isoformat()
+
+
+def get_or_create_quota(*, tenant_id: int | None) -> dict:
+    if tenant_id is None:
+        return {
+            "generations_per_day": 0,
+            "transcriptions_per_day": 0,
+            "vision_analyses_per_day": 0,
+        }
+    _init_db()
+    with _db() as s:
+        q = s.execute(select(TenantQuota).where(TenantQuota.tenant_id == tenant_id)).scalar_one_or_none()
+        if q is None:
+            q = TenantQuota(
+                tenant_id=tenant_id,
+                generations_per_day=_coerce_int(_secret_or_env("DEFAULT_GENERATIONS_PER_DAY"), 50),
+                transcriptions_per_day=_coerce_int(_secret_or_env("DEFAULT_TRANSCRIPTIONS_PER_DAY"), 50),
+                vision_analyses_per_day=_coerce_int(_secret_or_env("DEFAULT_VISION_PER_DAY"), 50),
+            )
+            s.add(q)
+            s.commit()
+        return {
+            "generations_per_day": int(q.generations_per_day or 0),
+            "transcriptions_per_day": int(q.transcriptions_per_day or 0),
+            "vision_analyses_per_day": int(q.vision_analyses_per_day or 0),
+        }
+
+
+def set_quota(
+    *,
+    tenant_id: int | None,
+    generations_per_day: int,
+    transcriptions_per_day: int,
+    vision_analyses_per_day: int,
+) -> None:
+    if tenant_id is None:
+        return
+    _init_db()
+    with _db() as s:
+        q = s.execute(select(TenantQuota).where(TenantQuota.tenant_id == tenant_id)).scalar_one_or_none()
+        if q is None:
+            q = TenantQuota(tenant_id=tenant_id)
+            s.add(q)
+            s.flush()
+        q.generations_per_day = max(0, int(generations_per_day))
+        q.transcriptions_per_day = max(0, int(transcriptions_per_day))
+        q.vision_analyses_per_day = max(0, int(vision_analyses_per_day))
+        q.updated_at = datetime.now(timezone.utc)
+        s.commit()
+
+
+def usage_counts_today(*, tenant_id: int | None) -> dict[str, int]:
+    if tenant_id is None:
+        return {"generate": 0, "transcribe": 0, "vision": 0}
+    _init_db()
+    day = _today_key()
+    with _db() as s:
+        rows = (
+            s.execute(select(DailyUsage).where(DailyUsage.tenant_id == tenant_id, DailyUsage.day == day))
+            .scalars()
+            .all()
+        )
+    out = {"generate": 0, "transcribe": 0, "vision": 0}
+    for r in rows:
+        out[str(r.action)] = int(r.count or 0)
+    return out
+
+
+def check_and_consume_quota(*, tenant_id: int | None, action: str, amount: int = 1) -> tuple[bool, str]:
+    """Returns (ok, message). If ok=True usage is incremented."""
+    if tenant_id is None:
+        return False, "Missing tenant."
+    action = (action or "").strip().lower()
+    if action not in {"generate", "transcribe", "vision"}:
+        return False, "Invalid action."
+    amount = max(1, int(amount or 1))
+
+    quota = get_or_create_quota(tenant_id=tenant_id)
+    limit = {
+        "generate": quota["generations_per_day"],
+        "transcribe": quota["transcriptions_per_day"],
+        "vision": quota["vision_analyses_per_day"],
+    }[action]
+    if limit <= 0:
+        return False, "This feature is disabled for your workspace."
+
+    _init_db()
+    day = _today_key()
+    with _db() as s:
+        row = s.execute(
+            select(DailyUsage).where(DailyUsage.tenant_id == tenant_id, DailyUsage.day == day, DailyUsage.action == action)
+        ).scalar_one_or_none()
+        if row is None:
+            row = DailyUsage(tenant_id=tenant_id, day=day, action=action, count=0)
+            s.add(row)
+            s.flush()
+        current = int(row.count or 0)
+        if current + amount > int(limit):
+            remaining = max(0, int(limit) - current)
+            return False, f"Daily quota reached for {action}. Remaining today: {remaining}."
+        row.count = current + amount
+        row.updated_at = datetime.now(timezone.utc)
+        s.commit()
+        remaining = max(0, int(limit) - int(row.count or 0))
+        return True, f"Quota ok. Remaining today: {remaining}."
 
 
 def save_history(items: list[dict]) -> None:
-    os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
-    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
+    # No-op: history is DB-backed now.
+    return
 
 
-def add_to_history(entry: dict, *, limit: int = 5) -> None:
-    items = load_history()
-    items.insert(0, entry)
-    # de-dupe by sop_sha256 if present
-    seen: set[str] = set()
-    deduped: list[dict] = []
-    for it in items:
-        key = str(it.get("sop_sha256") or "")
-        if key and key in seen:
-            continue
-        if key:
-            seen.add(key)
-        deduped.append(it)
-    save_history(deduped[:limit])
+def add_to_history(*, tenant_id: int | None, user_id: int | None, entry: dict) -> None:
+    """Persist an SOP version into the tenant workspace (proper versioning per SOP doc)."""
+    if tenant_id is None:
+        return
+    _init_db()
+    label = str(entry.get("label") or "SOP").strip() or "SOP"
+    template_name = str(entry.get("template_name") or "IT SOP")
+    sop_text = str(entry.get("sop_text") or "")
+    sop_sha = str(entry.get("sop_sha256") or sop_fingerprint(sop_text))
+    source = str(entry.get("source") or "generated")
+    change_note = str(entry.get("change_note") or "")
+    sop_doc_id = entry.get("sop_doc_id")
+
+    with _db() as s:
+        doc: SopDoc | None = None
+        if sop_doc_id is not None:
+            try:
+                doc = s.execute(
+                    select(SopDoc).where(SopDoc.tenant_id == tenant_id, SopDoc.id == int(sop_doc_id))
+                ).scalar_one_or_none()
+            except Exception:
+                doc = None
+
+        if doc is None:
+            # Reuse doc by (tenant, title, template) when possible.
+            doc = s.execute(
+                select(SopDoc).where(
+                    SopDoc.tenant_id == tenant_id,
+                    SopDoc.title == label,
+                    SopDoc.template_name == template_name,
+                )
+            ).scalar_one_or_none()
+
+        if doc is None:
+            doc = SopDoc(tenant_id=tenant_id, title=label, template_name=template_name, created_by_user_id=user_id)
+            s.add(doc)
+            s.flush()
+
+        next_version = (
+            s.execute(
+                select(SopVersion.version)
+                .where(SopVersion.tenant_id == tenant_id, SopVersion.sop_doc_id == doc.id)
+                .order_by(SopVersion.version.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            or 0
+        )
+        next_version = int(next_version) + 1
+        v = SopVersion(
+            tenant_id=tenant_id,
+            sop_doc_id=doc.id,
+            version=next_version,
+            status="draft",
+            label=label,
+            source=source,
+            sop_text=sop_text,
+            sop_sha256=sop_sha,
+            change_note=change_note,
+            created_at=datetime.fromisoformat(entry.get("ts")) if entry.get("ts") else datetime.now(timezone.utc),
+            created_by_user_id=user_id,
+        )
+        s.add(v)
+        s.commit()
+
+        # Store current doc id in session for "v2/v3" behavior.
+        try:
+            st.session_state.current_sop_doc_id = doc.id
+        except Exception:
+            pass
+
+
+def save_current_edits_as_new_version(
+    *,
+    tenant_id: int | None,
+    user_id: int | None,
+    template_name: str,
+    label: str,
+    sop_text: str,
+    source: str,
+    change_note: str,
+) -> None:
+    add_to_history(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        entry={
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "label": label,
+            "template_name": template_name,
+            "source": source,
+            "sop_text": sop_text,
+            "sop_sha256": sop_fingerprint(sop_text),
+            "change_note": change_note,
+            "sop_doc_id": st.session_state.get("current_sop_doc_id"),
+        },
+    )
+
+
+def update_sop_version_status(
+    *,
+    tenant_id: int | None,
+    sop_version_id: int,
+    new_status: str,
+    approved_by_user_id: int | None,
+) -> None:
+    if tenant_id is None:
+        return
+    new_status = (new_status or "").strip().lower()
+    if new_status not in {"draft", "in_review", "approved"}:
+        return
+    _init_db()
+    with _db() as s:
+        v = (
+            s.execute(
+                select(SopVersion).where(
+                    SopVersion.tenant_id == tenant_id,
+                    SopVersion.id == int(sop_version_id),
+                )
+            )
+            .scalars()
+            .one_or_none()
+        )
+        if v is None:
+            return
+        v.status = new_status
+        if new_status == "approved":
+            v.approved_at = datetime.now(timezone.utc)
+            v.approved_by_user_id = approved_by_user_id
+        s.commit()
+
+
+def delete_sop_version(*, tenant_id: int | None, sop_version_id: int) -> None:
+    if tenant_id is None:
+        return
+    _init_db()
+    with _db() as s:
+        v = (
+            s.execute(
+                select(SopVersion).where(
+                    SopVersion.tenant_id == tenant_id,
+                    SopVersion.id == int(sop_version_id),
+                )
+            )
+            .scalars()
+            .one_or_none()
+        )
+        if v is None:
+            return
+        s.delete(v)
+        s.commit()
+
+
+def list_users(*, tenant_id: int | None) -> list[dict]:
+    if tenant_id is None:
+        return []
+    _init_db()
+    with _db() as s:
+        rows = (
+            s.execute(select(User).where(User.tenant_id == tenant_id).order_by(User.created_at.desc()))
+            .scalars()
+            .all()
+        )
+    out: list[dict] = []
+    for u in rows:
+        out.append(
+            {
+                "id": u.id,
+                "email": u.email,
+                "role": u.role,
+                "is_active": bool(u.is_active),
+                "created_at": u.created_at.isoformat() if u.created_at else "",
+            }
+        )
+    return out
+
+
+def create_user(
+    *,
+    tenant_id: int | None,
+    email: str,
+    password: str,
+    role: str,
+) -> None:
+    if tenant_id is None:
+        return
+    email_n = _normalize_email(email)
+    role_n = (role or "member").strip().lower()
+    if role_n not in {"admin", "reviewer", "member"}:
+        role_n = "member"
+    if not email_n or not password:
+        return
+    _init_db()
+    with _db() as s:
+        existing = s.execute(select(User).where(User.tenant_id == tenant_id, User.email == email_n)).scalar_one_or_none()
+        if existing is not None:
+            raise ValueError("User already exists.")
+        s.add(
+            User(
+                tenant_id=tenant_id,
+                email=email_n,
+                password_hash=_PWD.hash(password),
+                role=role_n,
+                is_active=True,
+            )
+        )
+        s.commit()
+
+
+def set_user_active(*, tenant_id: int | None, user_id: int, is_active: bool) -> None:
+    if tenant_id is None:
+        return
+    _init_db()
+    with _db() as s:
+        u = s.execute(select(User).where(User.tenant_id == tenant_id, User.id == int(user_id))).scalar_one_or_none()
+        if u is None:
+            return
+        u.is_active = bool(is_active)
+        s.commit()
+
+
+def reset_user_password(*, tenant_id: int | None, user_id: int, new_password: str) -> None:
+    if tenant_id is None:
+        return
+    if not new_password:
+        return
+    _init_db()
+    with _db() as s:
+        u = s.execute(select(User).where(User.tenant_id == tenant_id, User.id == int(user_id))).scalar_one_or_none()
+        if u is None:
+            return
+        u.password_hash = _PWD.hash(new_password)
+        s.commit()
+
+
+def upsert_manual_from_pdf(
+    *,
+    tenant_id: int | None,
+    file_name: str,
+    pdf_bytes: bytes,
+    chunk_chars: int = 900,
+    overlap_chars: int = 150,
+) -> dict:
+    """Persist a PDF manual and its chunks in DB (deduped by sha256 per tenant)."""
+    if tenant_id is None:
+        return {"stored": False, "reason": "no-tenant"}
+    sha = hashlib.sha256(pdf_bytes).hexdigest()
+    text = extract_pdf_text_cached(file_sha256=sha, pdf_bytes=pdf_bytes)
+    chunks = _chunk_text(text, chunk_chars=chunk_chars, overlap_chars=overlap_chars)
+    _init_db()
+    with _db() as s:
+        existing = s.execute(
+            select(ManualDoc).where(ManualDoc.tenant_id == tenant_id, ManualDoc.sha256 == sha)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return {"stored": False, "reason": "duplicate", "sha256": sha, "name": existing.name}
+
+        doc = ManualDoc(tenant_id=tenant_id, name=str(file_name or "manual.pdf"), sha256=sha)
+        s.add(doc)
+        s.flush()
+        for idx, ch in enumerate(chunks):
+            s.add(ManualChunk(tenant_id=tenant_id, manual_doc_id=doc.id, chunk_index=idx, text=ch))
+        s.commit()
+        return {"stored": True, "sha256": sha, "name": doc.name, "chunks": len(chunks)}
+
+
+def list_manual_docs(*, tenant_id: int | None) -> list[dict]:
+    if tenant_id is None:
+        return []
+    _init_db()
+    with _db() as s:
+        docs = (
+            s.execute(select(ManualDoc).where(ManualDoc.tenant_id == tenant_id).order_by(ManualDoc.created_at.desc()))
+            .scalars()
+            .all()
+        )
+        out: list[dict] = []
+        for d in docs:
+            out.append({"id": d.id, "name": d.name, "sha256": d.sha256, "created_at": d.created_at.isoformat()})
+        return out
+
+
+def load_manual_docs_with_chunks(*, tenant_id: int | None, manual_doc_ids: list[int]) -> list[dict]:
+    if tenant_id is None:
+        return []
+    ids = [int(x) for x in (manual_doc_ids or []) if str(x).strip().isdigit()]
+    if not ids:
+        return []
+    _init_db()
+    with _db() as s:
+        docs = (
+            s.execute(select(ManualDoc).where(ManualDoc.tenant_id == tenant_id, ManualDoc.id.in_(ids)))
+            .scalars()
+            .all()
+        )
+        out: list[dict] = []
+        for d in docs:
+            chunks = (
+                s.execute(
+                    select(ManualChunk)
+                    .where(ManualChunk.tenant_id == tenant_id, ManualChunk.manual_doc_id == d.id)
+                    .order_by(ManualChunk.chunk_index.asc())
+                )
+                .scalars()
+                .all()
+            )
+            out.append({"id": d.id, "name": d.name, "sha256": d.sha256, "chunks": [c.text for c in chunks]})
+        return out
+
+
+def delete_manual_doc(*, tenant_id: int | None, manual_doc_id: int) -> None:
+    if tenant_id is None:
+        return
+    _init_db()
+    with _db() as s:
+        d = s.execute(select(ManualDoc).where(ManualDoc.tenant_id == tenant_id, ManualDoc.id == int(manual_doc_id))).scalar_one_or_none()
+        if d is None:
+            return
+        s.delete(d)
+        s.commit()
 
 
 TEMPLATE_GUIDANCE: dict[str, str] = {
@@ -678,7 +1585,8 @@ def build_prompt_for_template(
     include_checklist: bool,
 ) -> str:
     template_guidance = TEMPLATE_GUIDANCE.get(template_name, "")
-    feedback_items = load_recent_feedback(limit=60)
+    tenant_id = (_current_user() or {}).get("tenant_id")
+    feedback_items = load_recent_feedback(tenant_id=tenant_id, limit=60)
     recent_down_reasons = [
         (it.get("reason") or "").strip()
         for it in feedback_items
@@ -727,6 +1635,8 @@ Add a short section near the top titled exactly: "Based on notes:"
 Company rules (from uploaded manuals) — FOLLOW THESE STRICTLY:
 {company_rules}
 If any manual rule conflicts with the user's notes, call out the conflict and choose the safer/compliant path.
+When a procedure step is directly based on a manual rule, add an inline citation at the end of the step like:
+(Manual: <filename> chunk <N>).
 """.strip()
 
     return f"""
@@ -1058,9 +1968,38 @@ Do not invent details; if unclear, say "Unclear in image".
 logo_url = resolve_brand_logo_url(_brand)
 
 with st.sidebar:
+    auth = _current_user() or {}
+    tenant_id = auth.get("tenant_id")
+    user_id = auth.get("user_id")
+    user_role = str(auth.get("role") or "member")
+
+    col_auth1, col_auth2 = st.columns([3, 1])
+    with col_auth1:
+        st.caption(f"Signed in as **{auth.get('email','')}**")
+    with col_auth2:
+        if st.button("Sign out"):
+            st.session_state.pop("auth_user", None)
+            st.rerun()
+
+    # Quotas / rate limits (per tenant)
+    quota = get_or_create_quota(tenant_id=tenant_id)
+    usage = usage_counts_today(tenant_id=tenant_id)
+    with st.expander("Usage & quotas (today)", expanded=False):
+        st.caption(f"Date: {_today_key()}")
+        st.write(
+            {
+                "generations_used": usage.get("generate", 0),
+                "generations_limit": quota.get("generations_per_day", 0),
+                "transcriptions_used": usage.get("transcribe", 0),
+                "transcriptions_limit": quota.get("transcriptions_per_day", 0),
+                "vision_used": usage.get("vision", 0),
+                "vision_limit": quota.get("vision_analyses_per_day", 0),
+            }
+        )
+
     # Load profile once per session, then use it as widget defaults.
     if "company_profile_loaded" not in st.session_state:
-        profile = load_company_profile()
+        profile = load_company_profile(tenant_id=tenant_id)
         st.session_state.company_profile_loaded = True
         st.session_state.profile_audience = str(profile.get("audience", "") or "")
         st.session_state.profile_tools_used = str(profile.get("tools_used", "") or "")
@@ -1120,7 +2059,8 @@ with st.sidebar:
     with col_p1:
         if st.button("Save profile"):
             save_company_profile(
-                {
+                tenant_id=tenant_id,
+                profile={
                     "audience": st.session_state.profile_audience,
                     "tools_used": st.session_state.profile_tools_used,
                     "compliance_standard": st.session_state.profile_compliance,
@@ -1135,7 +2075,8 @@ with st.sidebar:
             st.session_state.profile_compliance = ""
             st.session_state.profile_tone = "Professional"
             save_company_profile(
-                {
+                tenant_id=tenant_id,
+                profile={
                     "audience": "",
                     "tools_used": "",
                     "compliance_standard": "",
@@ -1145,41 +2086,72 @@ with st.sidebar:
             st.success("Reset.")
 
     st.markdown("### Company Brain (RAG Lite)")
-    manuals = st.file_uploader(
-        "Upload PDF manuals (optional)",
+    rag_top_k = st.slider("Manual snippets to use", 2, 10, 6, 1)
+
+    # Persisted per-tenant manuals (DB)
+    existing_manuals = list_manual_docs(tenant_id=tenant_id)
+    manual_label_by_id = {int(m["id"]): f'{m["name"]} ({m["sha256"][:10]}…)'.strip() for m in existing_manuals}
+    selected_manual_ids = st.multiselect(
+        "Use these manuals",
+        options=[int(m["id"]) for m in existing_manuals],
+        default=[int(m["id"]) for m in existing_manuals][:3],
+        format_func=lambda mid: manual_label_by_id.get(int(mid), str(mid)),
+        help="These manuals are saved per tenant and reused across sessions.",
+    )
+
+    manuals_upload = st.file_uploader(
+        "Upload PDF manuals (saved to tenant library)",
         type=["pdf"],
         accept_multiple_files=True,
         help="Examples: Employee Handbook, Safety Guidelines, IT policy. These will be used as strict rules for SOPs.",
     )
-    rag_top_k = st.slider("Manual snippets to use", 2, 10, 6, 1)
+    if st.button("Save uploaded manuals to library", disabled=(not manuals_upload)):
+        stored = 0
+        dupes = 0
+        with st.spinner("Saving manuals..."):
+            for f in (manuals_upload or []):
+                try:
+                    res = upsert_manual_from_pdf(tenant_id=tenant_id, file_name=f.name, pdf_bytes=f.getvalue())
+                    if res.get("stored"):
+                        stored += 1
+                    else:
+                        if res.get("reason") == "duplicate":
+                            dupes += 1
+                except Exception as e:
+                    log_exception(e, context="Save manual to library")
+                    continue
+        st.success(f"Saved: {stored}. Duplicates skipped: {dupes}.")
+        st.rerun()
 
-    if "company_manual_docs" not in st.session_state:
-        st.session_state.company_manual_docs = []
-
-    if manuals:
-        docs: list[dict] = []
-        for f in manuals:
-            try:
-                pdf_bytes = f.getvalue()
-                sha = hashlib.sha256(pdf_bytes).hexdigest()
-                text = extract_pdf_text_cached(file_sha256=sha, pdf_bytes=pdf_bytes)
-                chunks = _chunk_text(text, chunk_chars=900, overlap_chars=150)
-                docs.append({"name": f.name, "sha256": sha, "chunks": chunks})
-            except Exception:
-                continue
-        st.session_state.company_manual_docs = docs
-        st.write(f"Loaded manuals: {len(docs)}")
+    if existing_manuals:
+        with st.expander("Manage manual library", expanded=False):
+            m_to_delete = st.selectbox(
+                "Delete a manual",
+                options=[int(m["id"]) for m in existing_manuals],
+                format_func=lambda mid: manual_label_by_id.get(int(mid), str(mid)),
+            )
+            if st.button("Delete manual permanently"):
+                try:
+                    delete_manual_doc(tenant_id=tenant_id, manual_doc_id=int(m_to_delete))
+                    st.success("Deleted.")
+                    st.rerun()
+                except Exception as e:
+                    show_busy_error(e, context="Delete manual")
     else:
-        st.caption("No manuals uploaded.")
+        st.caption("No manuals in the tenant library yet.")
+
+    # Load selected manuals into session for RAG usage downstream.
+    st.session_state.company_manual_docs = load_manual_docs_with_chunks(tenant_id=tenant_id, manual_doc_ids=selected_manual_ids)
 
     st.markdown("### History (last 5)")
-    history_items = load_history()
+    history_items = load_history(tenant_id=tenant_id, limit=5)
     if history_items:
         options = []
         for i, it in enumerate(history_items):
             ts = (it.get("ts") or "")[:19].replace("T", " ")
             label = it.get("label") or it.get("template_name") or "SOP"
-            options.append(f"{i+1}. {label} — {ts}")
+            status = (it.get("status") or "draft").replace("_", " ")
+            options.append(f"{i+1}. {label} [{status}] — {ts}")
 
         selected = st.selectbox("Saved SOPs", options, index=0)
         sel_idx = int(selected.split(".")[0]) - 1
@@ -1188,18 +2160,68 @@ with st.sidebar:
         if st.button("Load into editor"):
             st.session_state.current_sop_text = selected_item.get("sop_text", "") or ""
             st.session_state.last_inferred_topic = selected_item.get("label", "SOP") or "SOP"
+            st.session_state.current_sop_doc_id = selected_item.get("sop_doc_id")
             st.success("Loaded into editor.")
+
+        # Approval workflow (MVP)
+        st.markdown("### Approval workflow")
+        current_status = str(selected_item.get("status") or "draft")
+        status_label_map = {"draft": "Draft", "in_review": "In review", "approved": "Approved"}
+        status_options = ["draft", "in_review", "approved"]
+        can_change_status = user_role in {"admin", "reviewer"}
+        new_status = st.selectbox(
+            "Status",
+            status_options,
+            index=status_options.index(current_status) if current_status in status_options else 0,
+            format_func=lambda s: status_label_map.get(s, s),
+            disabled=not can_change_status,
+        )
+        if st.button("Update status", disabled=(not can_change_status)):
+            try:
+                update_sop_version_status(
+                    tenant_id=tenant_id,
+                    sop_version_id=int(selected_item.get("id")),
+                    new_status=new_status,
+                    approved_by_user_id=user_id,
+                )
+                st.success("Updated.")
+                st.rerun()
+            except Exception as e:
+                show_busy_error(e, context="Update SOP status")
+
+        # Version history + diff (per SOP doc)
+        with st.expander("Version history & diff", expanded=False):
+            doc_id = selected_item.get("sop_doc_id")
+            if doc_id:
+                versions = load_doc_versions(tenant_id=tenant_id, sop_doc_id=int(doc_id), limit=25)
+                if versions:
+                    v_labels = [
+                        f'v{v["version"]} · {str(v["status"]).replace("_"," ")} · {(v["ts"] or "")[:19].replace("T"," ")}'
+                        for v in versions
+                    ]
+                    v_a = st.selectbox("Version A", options=list(range(len(versions))), format_func=lambda i: v_labels[int(i)], index=0, key="diff_a")
+                    v_b = st.selectbox("Version B", options=list(range(len(versions))), format_func=lambda i: v_labels[int(i)], index=min(1, len(versions)-1), key="diff_b")
+                    if st.button("Show diff"):
+                        a_txt = versions[int(v_a)]["sop_text"]
+                        b_txt = versions[int(v_b)]["sop_text"]
+                        st.code(diff_text(a_txt, b_txt))
+                else:
+                    st.caption("No version history for this SOP yet.")
+            else:
+                st.caption("Select a saved SOP entry first.")
 
         col_h1, col_h2 = st.columns(2)
         with col_h1:
             if st.button("Delete selected"):
-                remaining = [it for j, it in enumerate(history_items) if j != sel_idx]
-                save_history(remaining[:5])
-                st.success("Deleted.")
+                try:
+                    delete_sop_version(tenant_id=tenant_id, sop_version_id=int(selected_item.get("id")))
+                    st.success("Deleted.")
+                    st.rerun()
+                except Exception as e:
+                    show_busy_error(e, context="Delete SOP version")
         with col_h2:
             if st.button("Clear history"):
-                save_history([])
-                st.success("Cleared.")
+                st.info("Clear history is not implemented yet (use Delete selected).")
     else:
         st.caption("No saved SOPs yet.")
 
@@ -1249,6 +2271,70 @@ with st.sidebar:
     if st.button("Clear cached results"):
         st.cache_data.clear()
 
+    # Tenant admin panel (MVP)
+    if user_role == "admin":
+        with st.expander("Admin (Users)", expanded=False):
+            st.caption("Create users and manage access for this tenant.")
+            with st.form("create_user"):
+                new_email = st.text_input("User email", placeholder="user@company.com")
+                new_pwd = st.text_input("Temporary password", type="password")
+                new_role = st.selectbox("Role", ["member", "reviewer", "admin"], index=0)
+                if st.form_submit_button("Create user"):
+                    try:
+                        create_user(tenant_id=tenant_id, email=new_email, password=new_pwd, role=new_role)
+                        st.success("User created.")
+                    except Exception as e:
+                        show_busy_error(e, context="Create user")
+
+            users = list_users(tenant_id=tenant_id)
+            if users:
+                st.markdown("#### Users")
+                selected_uid = st.selectbox(
+                    "Select user",
+                    options=[int(u["id"]) for u in users],
+                    format_func=lambda uid: next((f'{u["email"]} ({u["role"]}, {"active" if u["is_active"] else "disabled"})' for u in users if int(u["id"]) == int(uid)), str(uid)),
+                )
+                selected_user = next((u for u in users if int(u["id"]) == int(selected_uid)), None)
+                if selected_user:
+                    col_u1, col_u2 = st.columns(2)
+                    with col_u1:
+                        toggle_label = "Disable user" if selected_user["is_active"] else "Enable user"
+                        if st.button(toggle_label):
+                            try:
+                                set_user_active(tenant_id=tenant_id, user_id=int(selected_uid), is_active=not selected_user["is_active"])
+                                st.success("Updated.")
+                                st.rerun()
+                            except Exception as e:
+                                show_busy_error(e, context="Toggle user active")
+                    with col_u2:
+                        reset_pwd = st.text_input("Reset password", type="password", key=f"reset_pwd_{selected_uid}")
+                        if st.button("Set new password"):
+                            try:
+                                reset_user_password(tenant_id=tenant_id, user_id=int(selected_uid), new_password=reset_pwd)
+                                st.success("Password updated.")
+                            except Exception as e:
+                                show_busy_error(e, context="Reset password")
+
+        with st.expander("Admin (Quotas)", expanded=False):
+            st.caption("Set per-tenant daily limits. Set to 0 to disable a feature.")
+            q = get_or_create_quota(tenant_id=tenant_id)
+            with st.form("set_quotas"):
+                gen_q = st.number_input("Generations per day", min_value=0, max_value=100000, value=int(q.get("generations_per_day", 0)))
+                tr_q = st.number_input("Transcriptions per day", min_value=0, max_value=100000, value=int(q.get("transcriptions_per_day", 0)))
+                vi_q = st.number_input("Vision analyses per day", min_value=0, max_value=100000, value=int(q.get("vision_analyses_per_day", 0)))
+                if st.form_submit_button("Save quotas"):
+                    try:
+                        set_quota(
+                            tenant_id=tenant_id,
+                            generations_per_day=int(gen_q),
+                            transcriptions_per_day=int(tr_q),
+                            vision_analyses_per_day=int(vi_q),
+                        )
+                        st.success("Quotas updated.")
+                        st.rerun()
+                    except Exception as e:
+                        show_busy_error(e, context="Set quotas")
+
 
 header_left, header_right = st.columns([1, 6])
 with header_left:
@@ -1285,6 +2371,10 @@ with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
 
     if st.button("Transcribe audio", disabled=(not api_key or audio_file is None)):
         try:
+            ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="transcribe", amount=1)
+            if not ok:
+                st.error(msg)
+                st.stop()
             audio_bytes = audio_file.getvalue()
             file_sha = hashlib.sha256(audio_bytes).hexdigest()
             with st.spinner("Transcribing..."):
@@ -1321,6 +2411,10 @@ with st.expander("Vision (Image Analysis)", expanded=False):
 
     if st.button("Analyze image", disabled=(not api_key or image_file is None)):
         try:
+            ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="vision", amount=1)
+            if not ok:
+                st.error(msg)
+                st.stop()
             image_bytes = image_file.getvalue()
             file_sha = hashlib.sha256(image_bytes).hexdigest()
             mime_type = image_file.type or "image/png"
@@ -1358,6 +2452,10 @@ if generate:
     else:
         with st.spinner("Writing SOP..."):
             try:
+                ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="generate", amount=1)
+                if not ok:
+                    st.error(msg)
+                    st.stop()
                 inferred_topic = f"{template_name} SOP"
                 # Build company brain context for this generation (stored in session_state).
                 company_docs = st.session_state.get("company_manual_docs", []) or []
@@ -1399,13 +2497,16 @@ if generate:
                 st.session_state.current_sop_text = sop_text
 
                 add_to_history(
-                    {
+                    tenant_id=TENANT_ID,
+                    user_id=USER_ID,
+                    entry={
                         "ts": datetime.now(timezone.utc).isoformat(),
                         "label": inferred_topic,
                         "template_name": template_name,
                         "source": "generated",
                         "sop_text": sop_text,
                         "sop_sha256": sop_fingerprint(sop_text),
+                        "sop_doc_id": st.session_state.get("current_sop_doc_id"),
                     }
                 )
             except Exception as e:
@@ -1453,11 +2554,29 @@ if current_sop:
             height=320,
             key=f"editor_current_{sop_fingerprint(current_sop)}",
         )
+        edit_note = st.text_input(
+            "Change note (optional)",
+            value="",
+            placeholder="e.g., Clarified responsibilities, added exception handling",
+            key=f"edit_note_current_{sop_fingerprint(current_sop)}",
+        )
         col_ec1, col_ec2 = st.columns(2)
         with col_ec1:
             if st.button("Save edits", key=f"save_current_{sop_fingerprint(current_sop)}"):
-                st.session_state.current_sop_text = edited_current
-                st.success("Edits saved.")
+                try:
+                    st.session_state.current_sop_text = edited_current
+                    save_current_edits_as_new_version(
+                        tenant_id=TENANT_ID,
+                        user_id=USER_ID,
+                        template_name=template_name,
+                        label=str(st.session_state.get("last_inferred_topic") or "SOP"),
+                        sop_text=edited_current,
+                        source="edited",
+                        change_note=edit_note.strip(),
+                    )
+                    st.success("Edits saved as a new version.")
+                except Exception as e:
+                    show_busy_error(e, context="Save current edits as version")
         with col_ec2:
             if st.button("Reset to last generated", key="reset_current_to_last"):
                 st.session_state.current_sop_text = st.session_state.get("last_sop_text", "") or current_sop
@@ -1508,7 +2627,9 @@ if api_key and last_sop:
 
                 inferred_topic = st.session_state.get("last_inferred_topic", "SOP")
                 add_to_history(
-                    {
+                    tenant_id=TENANT_ID,
+                    user_id=USER_ID,
+                    entry={
                         "ts": datetime.now(timezone.utc).isoformat(),
                         "label": f"{inferred_topic} (revised)",
                         "template_name": template_name,
@@ -1542,11 +2663,29 @@ if api_key and last_sop:
                 height=320,
                 key=f"editor_rev_{sop_fingerprint(fixed_sop)}",
             )
+            edit_note_rev = st.text_input(
+                "Change note (optional)",
+                value="",
+                placeholder="e.g., Tightened steps, added records/evidence",
+                key=f"edit_note_rev_{sop_fingerprint(fixed_sop)}",
+            )
             col_r1, col_r2 = st.columns(2)
             with col_r1:
                 if st.button("Save revised edits", key=f"save_rev_{sop_fingerprint(fixed_sop)}"):
-                    st.session_state.current_sop_text = edited_rev
-                    st.success("Edits saved. Revised downloads will use the edited SOP.")
+                    try:
+                        st.session_state.current_sop_text = edited_rev
+                        save_current_edits_as_new_version(
+                            tenant_id=TENANT_ID,
+                            user_id=USER_ID,
+                            template_name=template_name,
+                            label=str(st.session_state.get("last_inferred_topic") or "SOP"),
+                            sop_text=edited_rev,
+                            source="edited",
+                            change_note=edit_note_rev.strip(),
+                        )
+                        st.success("Edits saved as a new version. Downloads will use the edited SOP.")
+                    except Exception as e:
+                        show_busy_error(e, context="Save revised edits as version")
             with col_r2:
                 if st.button("Reset to revised", key=f"reset_rev_{sop_fingerprint(fixed_sop)}"):
                     st.session_state.current_sop_text = fixed_sop
@@ -1597,7 +2736,8 @@ if api_key and last_sop:
             )
         if st.button("Submit revised feedback", key=f"submit_rev_{sop_fingerprint(fixed_sop)}"):
             append_feedback(
-                {
+                tenant_id=TENANT_ID,
+                entry={
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "rating": "up" if rating2.startswith("👍") else "down",
                     "reason": reason2.strip(),
