@@ -90,6 +90,8 @@ streamlit run app.py
 
 Streamlit Community Cloud does **not** give you a durable local disk. Use **PostgreSQL** for tenants, users, SOPs, manuals, and quotas.
 
+**Where is my data?** Your organization’s records (accounts, SOPs, manuals, quotas) live only in **your** PostgreSQL database—the server in `DATABASE_URL` (often [Neon](https://neon.tech)); the Streamlit host runs the app code and **does not** hold a second copy of your data.
+
 1. **Create a Postgres database** (any host works; common choices: [Neon](https://neon.tech), [Supabase](https://supabase.com), [Railway](https://railway.app), [Render](https://render.com), AWS RDS).
 2. **Create a database** (e.g. `fluency`) and a user with a strong password.
 3. **Connection string for this app** — SQLAlchemy + `psycopg2-binary`:
@@ -107,7 +109,16 @@ Streamlit Community Cloud does **not** give you a durable local disk. Use **Post
 
 4. Put the full string in **`DATABASE_URL`** (local `secrets.toml` or Streamlit Cloud **Secrets**).
 5. **First deploy**: the app runs `create_all` on startup; tables are created automatically. No separate migration runner is required for the current schema.
-6. **Backups** are your responsibility on the Postgres provider (enable PITR / scheduled backups).
+6. **Backups** are your responsibility and are configured in the **database provider’s console**—this app does not run backups for you.
+
+### Backups on Neon (PITR and exports)
+
+If you use **[Neon](https://neon.tech)**:
+
+- Enable **point-in-time restore (PITR)** and a **restore window** that matches your goals ([Backup & restore](https://neon.tech/docs/guides/backup-restore), [Backups](https://neon.tech/docs/manage/backups)—confirm limits for your Neon plan in the dashboard).
+- Add **scheduled logical backups** if you need periodic files (e.g. nightly `pg_dump`-style exports or Neon’s backup/export options) for compliance or off-site copies.
+
+Review Neon’s current backup and restore documentation when you go live; tune retention and export cadence to your RPO/RTO.
 
 **Local dev without Postgres:** omit `DATABASE_URL` and the app uses SQLite (`fluency.db`). Do not rely on SQLite for Cloud.
 
@@ -126,11 +137,14 @@ Use this before going live (Streamlit Cloud: **App settings → Secrets**; local
 | `SELF_SIGNUP_ENABLED` | No | Default **on**: “Create workspace” public signup. Set `false` for invite-only tenants. |
 | `DEBUG_ERRORS` | No | Leave **unset** or `false` in production; use `true` only while debugging. |
 | `APP_ACCESS_PASSWORD` | No | Optional extra gate **before** login; SaaS usually uses login only. |
+| `SESSION_SIGNING_SECRET` | **Yes** (recommended) | Long random string used to sign **browser cookies** so a full page refresh does not return users to the login wall. If unset, login is **in-memory only** (older behavior). See also `SESSION_COOKIE_DAYS`, `SESSION_COOKIE_SECURE`, `SESSION_COOKIE_NAME`. |
 | `APP_LOG_PATH` | No | Overrides log file path (default uses system temp). |
 | `DEFAULT_*_PER_DAY` | No | Quota defaults for new tenants (`DEFAULT_GENERATIONS_PER_DAY`, etc.). |
 | `[branding]` | No | Optional white-label (see `.streamlit/secrets.toml.example`). |
 
 After changing secrets on Streamlit Cloud, **restart the app** (Redeploy / reboot).
+
+**Browser sessions (refresh-friendly login):** Set `SESSION_SIGNING_SECRET` in secrets. After sign-in, a signed cookie keeps the session across **full page refresh**; the app still re-checks the user in the database (disabled or unverified accounts are rejected and the cookie is cleared). The optional `APP_ACCESS_PASSWORD` gate can use the same secret to remember that step in the browser. For local `http://` dev, `SESSION_COOKIE_SECURE` defaults to off unless you set it; with `https://` in `APP_BASE_URL`, secure cookies are the default.
 
 ---
 
