@@ -12,6 +12,7 @@ import base64
 from io import BytesIO
 import streamlit.components.v1 as components
 import hashlib
+import time
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from secrets import token_urlsafe
@@ -42,12 +43,6 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
-try:
-    from extra_streamlit_components import CookieManager
-except ImportError:
-    CookieManager = None  # type: ignore[misc, assignment]
-
-import time
 
 DEFAULT_BRANDING: dict[str, object] = {
     "app_name": "Fluency",
@@ -60,6 +55,8 @@ DEFAULT_BRANDING: dict[str, object] = {
     "secondary_color": "#833AB4",
     "accent_color": "#FCAF45",
     "hide_powered_by": True,
+    "access_gate_button": "Continue",
+    "sign_in_button": "Sign in",
 }
 
 _BRANDING_KEYS = frozenset(DEFAULT_BRANDING.keys())
@@ -100,6 +97,9 @@ _LOCAL_SECRETS = _load_local_secrets()
 # --- Logging + safe error UX (must be defined before auth) ---
 _DEFAULT_LOG_PATH = os.path.join(os.getenv("TMPDIR") or os.getenv("TEMP") or "/tmp", "fluency-app.log")
 APP_LOG_PATH = os.getenv("APP_LOG_PATH") or _DEFAULT_LOG_PATH
+
+# Persistent login (full page refresh / new Streamlit session). Requires SESSION_COOKIE_SECRET in secrets.
+SESSION_COOKIE_NAME = "fluency_auth"
 
 
 def log_exception(ex: Exception, *, context: str) -> None:
@@ -730,144 +730,175 @@ def _current_user() -> dict | None:
     return st.session_state.get("auth_user")
 
 
-def _session_hmac_key() -> bytes | None:
-    raw = _secret_first("SESSION_SIGNING_SECRET", "FLUENCY_SESSION_SECRET")
-    if not raw or not str(raw).strip():
-        return None
-    return hashlib.sha256(str(raw).strip().encode("utf-8")).digest()
-
-
-def _auth_cookie_name() -> str:
-    n = _secret_first("SESSION_COOKIE_NAME")
-    return (str(n).strip() if n else "") or "fluency_session"
-
-
-def _gate_cookie_name() -> str:
-    n = _secret_first("ACCESS_GATE_COOKIE_NAME")
-    return (str(n).strip() if n else "") or "fluency_access_gate"
-
-
-def _session_cookie_secure() -> bool:
-    raw = _secret_first("SESSION_COOKIE_SECURE")
-    if raw is not None and str(raw).strip() != "":
-        return _coerce_bool(raw, True)
-    base = (_secret_first("APP_BASE_URL", "PUBLIC_URL") or "").strip().lower()
-    return base.startswith("https://")
-
-
-def _b64url_decode(s: str) -> bytes:
-    pad = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + pad)
-
-
-def _sign_json_payload(payload: dict, key: bytes) -> str:
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    b64 = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-    sig = hmac.new(key, b64.encode("ascii"), hashlib.sha256).hexdigest()
-    return f"{b64}.{sig}"
-
-
-def _verify_signed_cookie_payload(token: str, key: bytes, *, kind: str) -> dict | None:
-    if "." not in token:
-        return None
-    b64, sig = token.rsplit(".", 1)
-    expected_sig = hmac.new(key, b64.encode("ascii"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected_sig):
-        return None
-    try:
-        obj = json.loads(_b64url_decode(b64).decode("utf-8"))
-    except Exception:
-        return None
-    if obj.get("v") != 1 or obj.get("k") != kind:
-        return None
-    exp = obj.get("exp")
-    if exp is None or time.time() > float(exp):
-        return None
-    return obj
-
-
-def _clear_auth_session_cookie() -> None:
-    if CookieManager is None:
-        return
-    if not _session_hmac_key():
-        return
-    try:
-        cm = CookieManager(key="fluency_cm_del_auth")
-        cm.delete(_auth_cookie_name(), key="fluency_del_auth_cookie")
-    except Exception:
-        pass
-
-
-def _persist_auth_session_cookie(u: User) -> None:
-    key = _session_hmac_key()
-    if not key or CookieManager is None:
-        return
-    days = _coerce_int(_secret_first("SESSION_COOKIE_DAYS"), 14)
-    if days < 1:
-        days = 14
-    exp = time.time() + days * 86400
-    payload = {
-        "v": 1,
-        "k": "auth",
-        "uid": u.id,
-        "tid": u.tenant_id,
-        "email": _normalize_email(u.email),
-        "role": str(u.role or "member"),
-        "exp": exp,
-    }
-    tok = _sign_json_payload(payload, key)
-    cm = CookieManager(key="fluency_cm_set_auth")
-    cm.set(
-        _auth_cookie_name(),
-        tok,
-        key="fluency_set_auth_cookie",
-        max_age=float(days * 86400),
-        secure=_session_cookie_secure(),
-        same_site="lax",
+def _session_cookie_secret_raw() -> str | None:
+    return _normalize_secret_value(
+        _secret_first("SESSION_COOKIE_SECRET", "FLUENCY_SESSION_SECRET")
     )
 
 
-def _restore_auth_from_session_cookie() -> None:
+def _session_cookie_max_age_seconds() -> int:
+    days = _coerce_int(_secret_first("SESSION_COOKIE_DAYS", "SESSION_MAX_AGE_DAYS"), 30)
+    return max(1, min(days, 366)) * 86400
+
+
+def _sign_session_token(user_id: int) -> str:
+    secret = _session_cookie_secret_raw()
+    if not secret:
+        return ""
+    exp = int(time.time()) + _session_cookie_max_age_seconds()
+    payload = json.dumps({"u": int(user_id), "exp": exp}, separators=(",", ":")).encode("utf-8")
+    b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    msg = f"v1.{b64}"
+    sig = hmac.new(secret.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{msg}.{sig}"
+
+
+def _verify_session_token(token: str) -> int | None:
+    secret = _session_cookie_secret_raw()
+    if not secret or not (token or "").strip():
+        return None
+    parts = token.strip().split(".")
+    if len(parts) != 3 or parts[0] != "v1":
+        return None
+    msg = f"{parts[0]}.{parts[1]}"
+    sig = parts[2]
+    try:
+        expected = hmac.new(secret.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None
+        pad = "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+        if int(data.get("exp", 0)) < int(time.time()):
+            return None
+        uid = data.get("u")
+        return int(uid) if uid is not None else None
+    except Exception:
+        return None
+
+
+def _session_cookie_from_request() -> str | None:
+    try:
+        ctx = getattr(st, "context", None)
+        if ctx is None:
+            return None
+        cookies = getattr(ctx, "cookies", None)
+        if not cookies:
+            return None
+        if hasattr(cookies, "get"):
+            v = cookies.get(SESSION_COOKIE_NAME)
+            if v:
+                return str(v)
+        return None
+    except Exception:
+        return None
+
+
+def _request_is_https() -> bool:
+    try:
+        h = getattr(st.context, "headers", None)
+        if h is None:
+            return False
+        proto = h.get("x-forwarded-proto") or h.get("X-Forwarded-Proto")
+        return str(proto or "").lower() == "https"
+    except Exception:
+        return False
+
+
+def _cookie_manager_singleton():
+    k = "_fluency_cookie_mgr"
+    if k not in st.session_state:
+        try:
+            import extra_streamlit_components as stx
+
+            st.session_state[k] = stx.CookieManager(key="fluency_auth_ck")
+        except Exception:
+            st.session_state[k] = None
+    return st.session_state[k]
+
+
+def _persist_session_cookie_js_fallback(token: str, max_age: int) -> None:
+    safe = json.dumps(token)
+    components.html(
+        f"""<script>
+const t = {safe};
+let s = "{SESSION_COOKIE_NAME}=" + encodeURIComponent(t) + "; path=/; max-age=" + {int(max_age)} + "; SameSite=Lax";
+if (location.protocol === "https:") s += "; Secure";
+try {{ document.cookie = s; }} catch (e) {{}}
+</script>""",
+        height=0,
+        width=0,
+    )
+
+
+def _clear_session_cookie_js_fallback() -> None:
+    components.html(
+        f"""<script>
+try {{
+  document.cookie = "{SESSION_COOKIE_NAME}=; path=/; max-age=0; SameSite=Lax";
+}} catch (e) {{}}
+</script>""",
+        height=0,
+        width=0,
+    )
+
+
+def _persist_session_cookie(user_id: int) -> None:
+    if not _session_cookie_secret_raw():
+        return
+    tok = _sign_session_token(user_id)
+    if not tok:
+        return
+    ma = _session_cookie_max_age_seconds()
+    mgr = _cookie_manager_singleton()
+    sec = True if _request_is_https() else None
+    if mgr:
+        try:
+            mgr.set(
+                SESSION_COOKIE_NAME,
+                tok,
+                path="/",
+                max_age=float(ma),
+                same_site="lax",
+                secure=sec,
+                key="persist_ck",
+            )
+        except Exception as ex:
+            log_exception(ex, context="CookieManager.set session")
+            _persist_session_cookie_js_fallback(tok, ma)
+    else:
+        _persist_session_cookie_js_fallback(tok, ma)
+
+
+def _clear_persistent_auth_cookie() -> None:
+    mgr = _cookie_manager_singleton()
+    if mgr:
+        try:
+            mgr.delete(SESSION_COOKIE_NAME, key="del_ck")
+        except Exception:
+            pass
+    _clear_session_cookie_js_fallback()
+
+
+def _restore_auth_from_signed_cookie() -> None:
     if st.session_state.get("auth_user"):
         return
-    key = _session_hmac_key()
-    if not key or CookieManager is None:
+    if not _session_cookie_secret_raw():
         return
-    cm = CookieManager(key="fluency_cm_restore_auth")
-    try:
-        raw = cm.get(_auth_cookie_name())
-    except Exception:
-        return
+    raw = _session_cookie_from_request()
     if not raw:
         return
-    payload = _verify_signed_cookie_payload(str(raw), key, kind="auth")
-    if not payload:
-        _clear_auth_session_cookie()
+    uid = _verify_session_token(raw)
+    if uid is None:
+        _clear_persistent_auth_cookie()
         return
-    try:
-        uid = int(payload["uid"])
-        tid = int(payload["tid"])
-    except Exception:
-        _clear_auth_session_cookie()
-        return
-    email_p = str(payload.get("email") or "")
     try:
         with _db() as s:
             u = s.get(User, uid)
-            if u is None:
-                _clear_auth_session_cookie()
-                return
-            if u.tenant_id != tid:
-                _clear_auth_session_cookie()
-                return
-            if u.is_active is False:
-                _clear_auth_session_cookie()
+            if u is None or u.is_active is False:
+                _clear_persistent_auth_cookie()
                 return
             if getattr(u, "email_verified", True) is False:
-                _clear_auth_session_cookie()
-                return
-            if _normalize_email(u.email) != _normalize_email(email_p):
-                _clear_auth_session_cookie()
+                _clear_persistent_auth_cookie()
                 return
             st.session_state.auth_user = {
                 "user_id": u.id,
@@ -876,42 +907,7 @@ def _restore_auth_from_session_cookie() -> None:
                 "role": u.role,
             }
     except Exception as ex:
-        log_exception(ex, context="Restore session cookie")
-
-
-def _try_restore_access_gate_cookie() -> bool:
-    key = _session_hmac_key()
-    if not key or CookieManager is None:
-        return False
-    cm = CookieManager(key="fluency_cm_restore_gate")
-    try:
-        raw = cm.get(_gate_cookie_name())
-    except Exception:
-        return False
-    if not raw:
-        return False
-    return _verify_signed_cookie_payload(str(raw), key, kind="gate") is not None
-
-
-def _persist_access_gate_cookie() -> None:
-    key = _session_hmac_key()
-    if not key or CookieManager is None:
-        return
-    days = _coerce_int(_secret_first("ACCESS_GATE_COOKIE_DAYS", "SESSION_COOKIE_DAYS"), 30)
-    if days < 1:
-        days = 30
-    exp = time.time() + days * 86400
-    payload = {"v": 1, "k": "gate", "exp": exp}
-    tok = _sign_json_payload(payload, key)
-    cm = CookieManager(key="fluency_cm_set_gate")
-    cm.set(
-        _gate_cookie_name(),
-        tok,
-        key="fluency_set_gate_cookie",
-        max_age=float(days * 86400),
-        secure=_session_cookie_secure(),
-        same_site="lax",
-    )
+        log_exception(ex, context="Restore session from cookie")
 
 
 def _require_auth_ui(brand: dict[str, object]) -> None:
@@ -927,7 +923,6 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
 
     _init_db()
     _ensure_bootstrap_admin()
-    _restore_auth_from_session_cookie()
 
     user = _current_user()
     if user:
@@ -940,17 +935,27 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
             raw_tok = qp.get("verify_token")
             if isinstance(raw_tok, list):
                 raw_tok = raw_tok[0]
+            msg: str | None = None
             if raw_tok:
                 if _consume_verification_token(str(raw_tok)):
-                    st.success("Email verified. You can sign in below.")
+                    msg = "ok"
                 else:
-                    st.error("Invalid or expired verification link.")
+                    msg = "err"
             try:
                 del st.query_params["verify_token"]
             except Exception:
                 pass
+            if msg:
+                st.session_state["_verify_flash"] = msg
+            st.rerun()
     except Exception as ex:
         log_exception(ex, context="Verify token from URL")
+
+    vf = st.session_state.pop("_verify_flash", None)
+    if vf == "ok":
+        st.success("Email verified. You can sign in below.")
+    elif vf == "err":
+        st.error("Invalid or expired verification link.")
 
     st.title(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
     st.caption("Sign in or create your organization workspace.")
@@ -1005,10 +1010,11 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
     tab_signin, tab_signup = st.tabs(["Sign in", "Create workspace"])
 
     with tab_signin:
+        sign_btn = str(brand.get("sign_in_button") or "Sign in").strip() or "Sign in"
         with st.form("login"):
             email = st.text_input("Email", key="login_email")
             pwd = st.text_input("Password", type="password", key="login_pwd")
-            if st.form_submit_button("Sign in"):
+            if st.form_submit_button(sign_btn):
                 try:
                     email_n = _normalize_email(email)
                     pwd_try = _normalize_password_input(pwd)
@@ -1059,7 +1065,7 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                                 "email": u.email,
                                 "role": u.role,
                             }
-                            _persist_auth_session_cookie(u)
+                            _persist_session_cookie(u.id)
                             st.rerun()
                 except Exception as e:
                     show_busy_error(e, context="Login")
@@ -1148,20 +1154,21 @@ def _optional_access_gate(brand: dict[str, object]) -> None:
         return
     if st.session_state.get("_access_granted"):
         return
-    if _try_restore_access_gate_cookie():
+    au = _current_user()
+    if au and au.get("user_id") is not None:
         st.session_state._access_granted = True
         return
     st.title(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
     st.caption("This deployment is password-protected.")
+    gate_btn = str(brand.get("access_gate_button") or "Continue").strip() or "Continue"
     with st.form("access_gate"):
         entered = st.text_input("Access password", type="password")
-        if st.form_submit_button("Continue"):
+        if st.form_submit_button(gate_btn):
             if hmac.compare_digest(
                 entered.encode("utf-8"),
                 expected.encode("utf-8"),
             ):
                 st.session_state._access_granted = True
-                _persist_access_gate_cookie()
                 st.rerun()
             else:
                 st.error("Incorrect password.")
@@ -1229,6 +1236,8 @@ def _branding_env_overrides() -> dict[str, object]:
         "BRAND_SECONDARY_COLOR": "secondary_color",
         "BRAND_ACCENT_COLOR": "accent_color",
         "BRAND_HIDE_POWERED_BY": "hide_powered_by",
+        "BRAND_ACCESS_GATE_BUTTON": "access_gate_button",
+        "BRAND_SIGN_IN_BUTTON": "sign_in_button",
     }
     for env_key, brand_key in mapping.items():
         val = os.getenv(env_key)
@@ -1423,6 +1432,12 @@ _brand = get_branding()
 _tab_title = str(_brand.get("page_title") or _brand.get("app_name") or DEFAULT_BRANDING["page_title"])
 _sync_browser_tab_title(_tab_title)
 st.markdown(build_branding_css(_brand), unsafe_allow_html=True)
+
+# Restore login before deploy gate so refresh keeps session + skips APP_ACCESS_PASSWORD when appropriate.
+if _login_required():
+    _init_db()
+    _ensure_bootstrap_admin()
+    _restore_auth_from_signed_cookie()
 
 _optional_access_gate(_brand)
 
@@ -2747,8 +2762,8 @@ with st.sidebar:
         st.caption(f"Signed in as **{auth.get('email','')}**")
     with col_auth2:
         if st.button("Sign out"):
-            _clear_auth_session_cookie()
             st.session_state.pop("auth_user", None)
+            _clear_persistent_auth_cookie()
             st.rerun()
 
     # Quotas / rate limits (per tenant)
