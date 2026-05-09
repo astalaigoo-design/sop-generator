@@ -143,15 +143,28 @@ def _secret_or_env(name: str) -> str | None:
     return _normalize_secret_value(os.getenv(name))
 
 
+def _secret_first(*keys: str) -> str | None:
+    """Return the first non-empty secret/env match (Streamlit Cloud keys vary by casing)."""
+    for k in keys:
+        v = _secret_or_env(k)
+        if v:
+            return v
+    return None
+
+
 def _database_url() -> str:
     """Database connection string.
 
     - SaaS/prod: set DATABASE_URL (e.g. Postgres).
     - Local dev: defaults to a local sqlite file.
     """
-    url = _secret_or_env("DATABASE_URL")
+    url = _secret_first(
+        "DATABASE_URL",
+        "database_url",
+        "database_URL",
+    )
     if url:
-        return url
+        return url.strip()
     return "sqlite+pysqlite:///./fluency.db"
 
 
@@ -390,45 +403,75 @@ def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
 
-def _ensure_bootstrap_admin() -> None:
-    """Ensure the very first admin exists (one-time bootstrap).
-
-    Uses secrets/env:
-    - BOOTSTRAP_TENANT_SLUG
-    - BOOTSTRAP_TENANT_NAME
-    - BOOTSTRAP_ADMIN_EMAIL
-    - BOOTSTRAP_ADMIN_PASSWORD
-    """
-    with _db() as s:
-        any_user = s.execute(select(User.id).limit(1)).scalar_one_or_none()
-        if any_user is not None:
-            return
-
-        slug = (_secret_or_env("BOOTSTRAP_TENANT_SLUG") or "default").strip()
-        name = (_secret_or_env("BOOTSTRAP_TENANT_NAME") or "Default Tenant").strip()
-        email = _normalize_email(_secret_or_env("BOOTSTRAP_ADMIN_EMAIL") or "")
-        pwd = _secret_or_env("BOOTSTRAP_ADMIN_PASSWORD") or ""
-
-        if not email or not pwd:
-            return
-
-        t = Tenant(slug=slug, name=name)
-        s.add(t)
-        s.flush()
-
-        u = User(tenant_id=t.id, email=email, password_hash=_hash_password(pwd), role="admin", is_active=True)
-        s.add(u)
-        s.add(TenantSettings(tenant_id=t.id))
-        # Default quotas (override via env/secrets at runtime if desired)
+def _ensure_tenant_settings_and_quota(s: Session, *, tenant_id: int) -> None:
+    """Ensure TenantSettings and TenantQuota rows exist for a tenant."""
+    ts = s.execute(select(TenantSettings).where(TenantSettings.tenant_id == tenant_id)).scalar_one_or_none()
+    if ts is None:
+        s.add(TenantSettings(tenant_id=tenant_id))
+    tq = s.execute(select(TenantQuota).where(TenantQuota.tenant_id == tenant_id)).scalar_one_or_none()
+    if tq is None:
         s.add(
             TenantQuota(
-                tenant_id=t.id,
-                generations_per_day=_coerce_int(_secret_or_env("DEFAULT_GENERATIONS_PER_DAY"), 50),
-                transcriptions_per_day=_coerce_int(_secret_or_env("DEFAULT_TRANSCRIPTIONS_PER_DAY"), 50),
-                vision_analyses_per_day=_coerce_int(_secret_or_env("DEFAULT_VISION_PER_DAY"), 50),
+                tenant_id=tenant_id,
+                generations_per_day=_coerce_int(_secret_first("DEFAULT_GENERATIONS_PER_DAY"), 50),
+                transcriptions_per_day=_coerce_int(_secret_first("DEFAULT_TRANSCRIPTIONS_PER_DAY"), 50),
+                vision_analyses_per_day=_coerce_int(_secret_first("DEFAULT_VISION_PER_DAY"), 50),
             )
         )
-        s.commit()
+
+
+def _ensure_bootstrap_admin() -> None:
+    """Create bootstrap admin from Streamlit secrets / env if that user does not exist yet.
+
+    Reads (first non-empty wins for alternate spellings):
+    - BOOTSTRAP_ADMIN_EMAIL / bootstrap_admin_email
+    - BOOTSTRAP_ADMIN_PASSWORD / bootstrap_admin_password
+    - BOOTSTRAP_TENANT_SLUG / bootstrap_tenant_slug (default: default)
+    - BOOTSTRAP_TENANT_NAME / bootstrap_tenant_name (default: Default Tenant)
+
+    Behavior:
+    - If email or password is missing, skip (interactive first-admin form still works).
+    - If a user with BOOTSTRAP_ADMIN_EMAIL already exists, skip (idempotent).
+    - Otherwise find tenant by slug or create it, then create the admin user on Neon/Postgres.
+
+    This runs after `_init_db()` so tables exist on a fresh Neon database.
+    """
+    email = _normalize_email(
+        _secret_first("BOOTSTRAP_ADMIN_EMAIL", "bootstrap_admin_email") or ""
+    )
+    pwd = _secret_first("BOOTSTRAP_ADMIN_PASSWORD", "bootstrap_admin_password") or ""
+
+    if not email or not pwd:
+        return
+
+    slug = (_secret_first("BOOTSTRAP_TENANT_SLUG", "bootstrap_tenant_slug") or "default").strip()
+    name = (_secret_first("BOOTSTRAP_TENANT_NAME", "bootstrap_tenant_name") or "Default Tenant").strip()
+
+    try:
+        with _db() as s:
+            existing = s.execute(select(User).where(User.email == email)).scalar_one_or_none()
+            if existing is not None:
+                return
+
+            t = s.execute(select(Tenant).where(Tenant.slug == slug)).scalar_one_or_none()
+            if t is None:
+                t = Tenant(slug=slug, name=name or slug)
+                s.add(t)
+                s.flush()
+
+            _ensure_tenant_settings_and_quota(s, tenant_id=t.id)
+
+            u = User(
+                tenant_id=t.id,
+                email=email,
+                password_hash=_hash_password(pwd),
+                role="admin",
+                is_active=True,
+            )
+            s.add(u)
+            s.commit()
+    except Exception as ex:
+        log_exception(ex, context="Bootstrap admin from secrets")
 
 
 def _login_required() -> bool:
