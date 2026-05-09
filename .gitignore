@@ -8,4 +8,5 @@ __pycache__/
 .streamlit/feedback.jsonl
 .streamlit/history.json
 .streamlit/app.log
+.streamlit/.session_cookie_secret
 .vs/
