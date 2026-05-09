@@ -135,6 +135,18 @@ BOOTSTRAP_ADMIN_PASSWORD = "use-a-strong-password"
 
 4. Reboot the app after changes.
 
+## Redeploy + smoke test (Streamlit Cloud + Neon)
+
+After you push the latest code (including the self-signup default fix):
+
+1. **Streamlit Cloud** → your app → **Reboot** (or trigger a new deploy from Git).
+2. In **Secrets**, confirm **`DATABASE_URL`** is your Neon Postgres URL (not empty). Optional: add `SHOW_DB_HINT = true` temporarily — the login page will show **Deployment DB: PostgreSQL** (remove after testing).
+3. Open the app URL. You should see **Sign in** and **Create workspace** (unless `SELF_SIGNUP_ENABLED = false`).
+4. **Create workspace**: use a new workspace URL, org name, email, password (8+ chars). Submit → you should see success; then **Sign in** with the same email and password.
+5. After login, open the sidebar **Usage & quotas** expander — it shows **Database: PostgreSQL** when `DATABASE_URL` is set. If it says **SQLite (dev only)**, Cloud is not using Neon (check secrets and reboot).
+6. In **Neon** (dashboard / query), confirm new rows in your tables (e.g. `tenants`, `users`) after signup.
+7. Set **`SHOW_DB_HINT = false`** or remove it, and keep **`DEBUG_ERRORS`** off in production.
+
 ## Notes
 
 - Never commit real secrets. This repo gitignores `.streamlit/secrets.toml` and `.streamlit/secrets.local.toml`.
