@@ -24,6 +24,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import difflib
 from datetime import date
 from passlib.context import CryptContext
+from passlib.hash import bcrypt as _bcrypt_hash
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -175,6 +176,50 @@ def _verify_password(password: str, password_hash: str) -> bool:
         return _PWD.verify(password or "", password_hash)
     except Exception:
         return False
+
+
+def _verify_and_migrate_password(
+    *,
+    tenant_id: int | None,
+    user_id: int | None,
+    password: str,
+    password_hash: str,
+) -> bool:
+    """Verify password, and migrate legacy bcrypt hashes to pbkdf2_sha256 on success."""
+    pw = password or ""
+    ph = password_hash or ""
+
+    # First try current scheme.
+    if _verify_password(pw, ph):
+        return True
+
+    # Legacy support: bcrypt hashes start with $2a$ / $2b$ / $2y$.
+    if ph.startswith("$2a$") or ph.startswith("$2b$") or ph.startswith("$2y$"):
+        try:
+            # bcrypt only uses first 72 bytes; avoid passlib throwing.
+            pw72 = pw.encode("utf-8")[:72].decode("utf-8", "ignore")
+            ok = _bcrypt_hash.verify(pw72, ph)
+        except Exception:
+            ok = False
+        if not ok:
+            return False
+
+        # Migrate to pbkdf2_sha256 (best-effort; never block login if migration fails).
+        if tenant_id is not None and user_id is not None:
+            try:
+                _init_db()
+                with _db() as s:
+                    u = s.execute(
+                        select(User).where(User.tenant_id == int(tenant_id), User.id == int(user_id))
+                    ).scalar_one_or_none()
+                    if u is not None:
+                        u.password_hash = _hash_password(pw)
+                        s.commit()
+            except Exception:
+                pass
+        return True
+
+    return False
 
 
 class Base(DeclarativeBase):
@@ -459,7 +504,12 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                 email_n = _normalize_email(email)
                 with _db() as s:
                     u = s.execute(select(User).where(User.email == email_n, User.is_active == True)).scalar_one_or_none()
-                    if u is None or not _verify_password(pwd, u.password_hash):
+                    if u is None or not _verify_and_migrate_password(
+                        tenant_id=u.tenant_id,
+                        user_id=u.id,
+                        password=pwd,
+                        password_hash=u.password_hash,
+                    ):
                         st.error("Invalid email or password.")
                     else:
                         st.session_state.auth_user = {
@@ -1160,6 +1210,46 @@ def diff_text(a: str, b: str) -> str:
     a_lines = (a or "").splitlines(keepends=True)
     b_lines = (b or "").splitlines(keepends=True)
     return "".join(difflib.unified_diff(a_lines, b_lines, fromfile="version_a", tofile="version_b"))
+
+
+def list_sop_docs(*, tenant_id: int | None, query: str = "", limit: int = 100) -> list[dict]:
+    if tenant_id is None:
+        return []
+    q = (query or "").strip().lower()
+    _init_db()
+    with _db() as s:
+        docs = (
+            s.execute(select(SopDoc).where(SopDoc.tenant_id == tenant_id).order_by(SopDoc.created_at.desc()).limit(int(limit)))
+            .scalars()
+            .all()
+        )
+        out: list[dict] = []
+        for d in docs:
+            if q and q not in (d.title or "").lower() and q not in (d.template_name or "").lower():
+                continue
+            latest = (
+                s.execute(
+                    select(SopVersion)
+                    .where(SopVersion.tenant_id == tenant_id, SopVersion.sop_doc_id == d.id)
+                    .order_by(SopVersion.version.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .one_or_none()
+            )
+            out.append(
+                {
+                    "id": d.id,
+                    "title": d.title,
+                    "template_name": d.template_name,
+                    "created_at": d.created_at.isoformat() if d.created_at else "",
+                    "latest_version": int(getattr(latest, "version", 0) or 0),
+                    "latest_status": str(getattr(latest, "status", "") or ""),
+                    "latest_ts": getattr(latest, "created_at", None).isoformat() if getattr(latest, "created_at", None) else "",
+                    "latest_text": str(getattr(latest, "sop_text", "") or ""),
+                }
+            )
+        return out
 
 def _today_key() -> str:
     return date.today().isoformat()
@@ -2027,6 +2117,9 @@ with st.sidebar:
     user_id = auth.get("user_id")
     user_role = str(auth.get("role") or "member")
 
+    st.markdown("### Navigation")
+    active_page = st.radio("Page", ["Generator", "Library"], horizontal=True, label_visibility="collapsed")
+
     col_auth1, col_auth2 = st.columns([3, 1])
     with col_auth1:
         st.caption(f"Signed in as **{auth.get('email','')}**")
@@ -2197,87 +2290,29 @@ with st.sidebar:
     # Load selected manuals into session for RAG usage downstream.
     st.session_state.company_manual_docs = load_manual_docs_with_chunks(tenant_id=tenant_id, manual_doc_ids=selected_manual_ids)
 
-    st.markdown("### History (last 5)")
-    history_items = load_history(tenant_id=tenant_id, limit=5)
-    if history_items:
-        options = []
-        for i, it in enumerate(history_items):
-            ts = (it.get("ts") or "")[:19].replace("T", " ")
-            label = it.get("label") or it.get("template_name") or "SOP"
-            status = (it.get("status") or "draft").replace("_", " ")
-            options.append(f"{i+1}. {label} [{status}] — {ts}")
+    # Keep the old "History (last 5)" in Generator mode only.
+    if active_page == "Generator":
+        st.markdown("### History (last 5)")
+        history_items = load_history(tenant_id=tenant_id, limit=5)
+        if history_items:
+            options = []
+            for i, it in enumerate(history_items):
+                ts = (it.get("ts") or "")[:19].replace("T", " ")
+                label = it.get("label") or it.get("template_name") or "SOP"
+                status = (it.get("status") or "draft").replace("_", " ")
+                options.append(f"{i+1}. {label} [{status}] — {ts}")
 
-        selected = st.selectbox("Saved SOPs", options, index=0)
-        sel_idx = int(selected.split(".")[0]) - 1
-        selected_item = history_items[sel_idx]
+            selected = st.selectbox("Saved SOPs", options, index=0)
+            sel_idx = int(selected.split(".")[0]) - 1
+            selected_item = history_items[sel_idx]
 
-        if st.button("Load into editor"):
-            st.session_state.current_sop_text = selected_item.get("sop_text", "") or ""
-            st.session_state.last_inferred_topic = selected_item.get("label", "SOP") or "SOP"
-            st.session_state.current_sop_doc_id = selected_item.get("sop_doc_id")
-            st.success("Loaded into editor.")
-
-        # Approval workflow (MVP)
-        st.markdown("### Approval workflow")
-        current_status = str(selected_item.get("status") or "draft")
-        status_label_map = {"draft": "Draft", "in_review": "In review", "approved": "Approved"}
-        status_options = ["draft", "in_review", "approved"]
-        can_change_status = user_role in {"admin", "reviewer"}
-        new_status = st.selectbox(
-            "Status",
-            status_options,
-            index=status_options.index(current_status) if current_status in status_options else 0,
-            format_func=lambda s: status_label_map.get(s, s),
-            disabled=not can_change_status,
-        )
-        if st.button("Update status", disabled=(not can_change_status)):
-            try:
-                update_sop_version_status(
-                    tenant_id=tenant_id,
-                    sop_version_id=int(selected_item.get("id")),
-                    new_status=new_status,
-                    approved_by_user_id=user_id,
-                )
-                st.success("Updated.")
-                st.rerun()
-            except Exception as e:
-                show_busy_error(e, context="Update SOP status")
-
-        # Version history + diff (per SOP doc)
-        with st.expander("Version history & diff", expanded=False):
-            doc_id = selected_item.get("sop_doc_id")
-            if doc_id:
-                versions = load_doc_versions(tenant_id=tenant_id, sop_doc_id=int(doc_id), limit=25)
-                if versions:
-                    v_labels = [
-                        f'v{v["version"]} · {str(v["status"]).replace("_"," ")} · {(v["ts"] or "")[:19].replace("T"," ")}'
-                        for v in versions
-                    ]
-                    v_a = st.selectbox("Version A", options=list(range(len(versions))), format_func=lambda i: v_labels[int(i)], index=0, key="diff_a")
-                    v_b = st.selectbox("Version B", options=list(range(len(versions))), format_func=lambda i: v_labels[int(i)], index=min(1, len(versions)-1), key="diff_b")
-                    if st.button("Show diff"):
-                        a_txt = versions[int(v_a)]["sop_text"]
-                        b_txt = versions[int(v_b)]["sop_text"]
-                        st.code(diff_text(a_txt, b_txt))
-                else:
-                    st.caption("No version history for this SOP yet.")
-            else:
-                st.caption("Select a saved SOP entry first.")
-
-        col_h1, col_h2 = st.columns(2)
-        with col_h1:
-            if st.button("Delete selected"):
-                try:
-                    delete_sop_version(tenant_id=tenant_id, sop_version_id=int(selected_item.get("id")))
-                    st.success("Deleted.")
-                    st.rerun()
-                except Exception as e:
-                    show_busy_error(e, context="Delete SOP version")
-        with col_h2:
-            if st.button("Clear history"):
-                st.info("Clear history is not implemented yet (use Delete selected).")
-    else:
-        st.caption("No saved SOPs yet.")
+            if st.button("Load into editor"):
+                st.session_state.current_sop_text = selected_item.get("sop_text", "") or ""
+                st.session_state.last_inferred_topic = selected_item.get("label", "SOP") or "SOP"
+                st.session_state.current_sop_doc_id = selected_item.get("sop_doc_id")
+                st.success("Loaded into editor.")
+        else:
+            st.caption("No saved SOPs yet.")
 
     st.markdown("### Settings")
     template_name = st.selectbox(
@@ -2409,179 +2444,211 @@ if not api_key:
         "or as the environment variable `GROQ_API_KEY` to generate SOPs."
     )
 
-with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
-    st.caption("Upload an audio file, transcribe it, then generate the SOP from the transcript.")
-    audio_file = st.file_uploader(
-        "Upload audio",
-        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "webm"],
-        accept_multiple_files=False,
-    )
-    stt_model = st.selectbox(
-        "Speech-to-text model",
-        ["whisper-large-v3-turbo", "whisper-large-v3"],
-        index=0,
-    )
-    stt_language = st.text_input("Language (optional, ISO-639-1)", value="", placeholder="e.g., en")
+if active_page == "Generator":
+    with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
+        st.caption("Upload an audio file, transcribe it, then generate the SOP from the transcript.")
+        audio_file = st.file_uploader(
+            "Upload audio",
+            type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "webm"],
+            accept_multiple_files=False,
+        )
+        stt_model = st.selectbox(
+            "Speech-to-text model",
+            ["whisper-large-v3-turbo", "whisper-large-v3"],
+            index=0,
+        )
+        stt_language = st.text_input("Language (optional, ISO-639-1)", value="", placeholder="e.g., en")
 
-    if st.button("Transcribe audio", disabled=(not api_key or audio_file is None)):
-        try:
-            ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="transcribe", amount=1)
-            if not ok:
-                st.error(msg)
-                st.stop()
-            audio_bytes = audio_file.getvalue()
-            file_sha = hashlib.sha256(audio_bytes).hexdigest()
-            with st.spinner("Transcribing..."):
-                transcript = transcribe_audio_cached(
-                    api_key=api_key,
-                    model=stt_model,
-                    file_name=audio_file.name,
-                    file_sha256=file_sha,
-                    audio_bytes=audio_bytes,
-                    language=stt_language.strip(),
-                )
-            if transcript:
-                st.session_state.notes = transcript
-                st.success("Transcription complete. The Notes box below was filled.")
-            else:
-                st.error("Transcription returned empty text.")
-        except Exception:
-            show_busy_error()
-with st.expander("Vision (Image Analysis)", expanded=False):
-    st.caption("Upload an image (photo/screenshot). We'll extract structured notes and fill the Notes box.")
-    image_file = st.file_uploader(
-        "Upload image",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=False,
-    )
-    vision_model = st.selectbox(
-        "Vision model",
-        ["meta-llama/llama-4-scout-17b-16e-instruct"],
-        index=0,
-    )
-
-    if image_file is not None:
-        st.image(image_file, caption=image_file.name, use_container_width=True)
-
-    if st.button("Analyze image", disabled=(not api_key or image_file is None)):
-        try:
-            ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="vision", amount=1)
-            if not ok:
-                st.error(msg)
-                st.stop()
-            image_bytes = image_file.getvalue()
-            file_sha = hashlib.sha256(image_bytes).hexdigest()
-            mime_type = image_file.type or "image/png"
-            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-            with st.spinner("Analyzing image..."):
-                extracted_notes = analyze_image_to_notes_cached(
-                    api_key=api_key,
-                    model=vision_model,
-                    file_sha256=file_sha,
-                    mime_type=mime_type,
-                    image_b64=image_b64,
-                )
-
-            if extracted_notes:
-                st.session_state.notes = extracted_notes
-                st.success("Image analysis complete. The Notes box below was filled.")
-            else:
-                st.error("Image analysis returned empty text.")
-        except Exception:
-            show_busy_error()
-
-notes = st.text_area(
-    "Input notes / raw text",
-    key="notes",
-    height=220,
-    placeholder="Paste your notes here (or use Voice Mode / Vision to generate notes).",
-)
-
-generate = st.button("Generate SOP", type="primary", disabled=not api_key)
-
-if generate:
-    if not notes.strip():
-        st.error("Please paste your notes (or a transcript) first.")
-    else:
-        with st.spinner("Writing SOP..."):
+        if st.button("Transcribe audio", disabled=(not api_key or audio_file is None)):
             try:
-                ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="generate", amount=1)
+                ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="transcribe", amount=1)
                 if not ok:
                     st.error(msg)
                     st.stop()
-                inferred_topic = f"{template_name} SOP"
-                # Build company brain context for this generation (stored in session_state).
-                company_docs = st.session_state.get("company_manual_docs", []) or []
-                st.session_state.company_rules_context = ""
-                if company_docs:
-                    query = f"{template_name}\n{inferred_topic}\n{audience}\n{tools_used}\n{compliance_standard}\n{notes}"
-                    snippets = retrieve_company_snippets(query=query, docs=company_docs, top_k=int(rag_top_k))
-                    if snippets:
-                        ctx_lines = []
-                        for s in snippets:
-                            ctx_lines.append(
-                                f"- ({s['doc']} #chunk{s['chunk_index']}) {s['text']}"
-                            )
-                        st.session_state.company_rules_context = "\n".join(ctx_lines)
-
-                prompt = build_prompt_for_template(
-                    template_name,
-                    inferred_topic,
-                    notes,
-                    audience=audience.strip() or "General staff",
-                    tools_used=tools_used.strip(),
-                    compliance_standard=compliance_standard.strip(),
-                    strictness=strictness,
-                    tone=tone,
-                    include_definitions=include_definitions,
-                    include_safety_compliance=include_safety_compliance,
-                    include_records=include_records,
-                    include_checklist=include_checklist,
-                )
-                sop_text = generate_sop_cached(
-                    api_key=api_key,
-                    model=model,
-                    temperature=float(temperature),
-                    prompt=prompt,
-                )
-                st.session_state.last_sop_text = sop_text
-                st.session_state.last_inferred_topic = inferred_topic
-                # Always set the "current" SOP so it persists across any subsequent button clicks.
-                st.session_state.current_sop_text = sop_text
-
-                add_to_history(
-                    tenant_id=TENANT_ID,
-                    user_id=USER_ID,
-                    entry={
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "label": inferred_topic,
-                        "template_name": template_name,
-                        "source": "generated",
-                        "sop_text": sop_text,
-                        "sop_sha256": sop_fingerprint(sop_text),
-                        "sop_doc_id": st.session_state.get("current_sop_doc_id"),
-                    }
-                )
+                audio_bytes = audio_file.getvalue()
+                file_sha = hashlib.sha256(audio_bytes).hexdigest()
+                with st.spinner("Transcribing..."):
+                    transcript = transcribe_audio_cached(
+                        api_key=api_key,
+                        model=stt_model,
+                        file_name=audio_file.name,
+                        file_sha256=file_sha,
+                        audio_bytes=audio_bytes,
+                        language=stt_language.strip(),
+                    )
+                if transcript:
+                    st.session_state.notes = transcript
+                    st.success("Transcription complete. The Notes box below was filled.")
+                else:
+                    st.error("Transcription returned empty text.")
             except Exception as e:
-                show_busy_error(e, context="Generate SOP")
-                sop_text = ""
+                show_busy_error(e, context="Transcribe audio")
 
-        if sop_text:
-            # Enforce strict Markdown structure. If the model drifts, auto-fix it once.
-            if not is_valid_sop_markdown(sop_text):
+    with st.expander("Vision (Image Analysis)", expanded=False):
+        st.caption("Upload an image (photo/screenshot). We'll extract structured notes and fill the Notes box.")
+        image_file = st.file_uploader(
+            "Upload image",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=False,
+        )
+        vision_model = st.selectbox(
+            "Vision model",
+            ["meta-llama/llama-4-scout-17b-16e-instruct"],
+            index=0,
+        )
+
+        if image_file is not None:
+            st.image(image_file, caption=image_file.name, use_container_width=True)
+
+        if st.button("Analyze image", disabled=(not api_key or image_file is None)):
+            try:
+                ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="vision", amount=1)
+                if not ok:
+                    st.error(msg)
+                    st.stop()
+                image_bytes = image_file.getvalue()
+                file_sha = hashlib.sha256(image_bytes).hexdigest()
+                mime_type = image_file.type or "image/png"
+                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+                with st.spinner("Analyzing image..."):
+                    extracted_notes = analyze_image_to_notes_cached(
+                        api_key=api_key,
+                        model=vision_model,
+                        file_sha256=file_sha,
+                        mime_type=mime_type,
+                        image_b64=image_b64,
+                    )
+
+                if extracted_notes:
+                    st.session_state.notes = extracted_notes
+                    st.success("Image analysis complete. The Notes box below was filled.")
+                else:
+                    st.error("Image analysis returned empty text.")
+            except Exception as e:
+                show_busy_error(e, context="Analyze image")
+
+    notes = st.text_area(
+        "Input notes / raw text",
+        key="notes",
+        height=220,
+        placeholder="Paste your notes here (or use Voice Mode / Vision to generate notes).",
+    )
+
+    generate = st.button("Generate SOP", type="primary", disabled=not api_key)
+
+    if generate:
+        if not notes.strip():
+            st.error("Please paste your notes (or a transcript) first.")
+        else:
+            with st.spinner("Writing SOP..."):
                 try:
-                    sop_text = format_sop_to_required_markdown_cached(
+                    ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="generate", amount=1)
+                    if not ok:
+                        st.error(msg)
+                        st.stop()
+                    inferred_topic = f"{template_name} SOP"
+                    # Build company brain context for this generation (stored in session_state).
+                    company_docs = st.session_state.get("company_manual_docs", []) or []
+                    st.session_state.company_rules_context = ""
+                    if company_docs:
+                        query = f"{template_name}\n{inferred_topic}\n{audience}\n{tools_used}\n{compliance_standard}\n{notes}"
+                        snippets = retrieve_company_snippets(query=query, docs=company_docs, top_k=int(rag_top_k))
+                        if snippets:
+                            ctx_lines = []
+                            for s in snippets:
+                                ctx_lines.append(
+                                    f"- ({s['doc']} #chunk{s['chunk_index']}) {s['text']}"
+                                )
+                            st.session_state.company_rules_context = "\n".join(ctx_lines)
+
+                    prompt = build_prompt_for_template(
+                        template_name,
+                        inferred_topic,
+                        notes,
+                        audience=audience.strip() or "General staff",
+                        tools_used=tools_used.strip(),
+                        compliance_standard=compliance_standard.strip(),
+                        strictness=strictness,
+                        tone=tone,
+                        include_definitions=include_definitions,
+                        include_safety_compliance=include_safety_compliance,
+                        include_records=include_records,
+                        include_checklist=include_checklist,
+                    )
+                    sop_text = generate_sop_cached(
                         api_key=api_key,
                         model=model,
-                        sop_text=sop_text,
+                        temperature=float(temperature),
+                        prompt=prompt,
+                    )
+                    st.session_state.last_sop_text = sop_text
+                    st.session_state.last_inferred_topic = inferred_topic
+                    # Always set the "current" SOP so it persists across any subsequent button clicks.
+                    st.session_state.current_sop_text = sop_text
+
+                    add_to_history(
+                        tenant_id=TENANT_ID,
+                        user_id=USER_ID,
+                        entry={
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "label": inferred_topic,
+                            "template_name": template_name,
+                            "source": "generated",
+                            "sop_text": sop_text,
+                            "sop_sha256": sop_fingerprint(sop_text),
+                            "sop_doc_id": st.session_state.get("current_sop_doc_id"),
+                        }
                     )
                 except Exception as e:
-                    show_busy_error(e, context="Format SOP to required Markdown")
+                    show_busy_error(e, context="Generate SOP")
+                    sop_text = ""
 
-            st.session_state.last_sop_text = sop_text
-            st.session_state.current_sop_text = sop_text
-            st.success("SOP generated. See 'Current SOP' below.")
+            if sop_text:
+                # Enforce strict Markdown structure. If the model drifts, auto-fix it once.
+                if not is_valid_sop_markdown(sop_text):
+                    try:
+                        sop_text = format_sop_to_required_markdown_cached(
+                            api_key=api_key,
+                            model=model,
+                            sop_text=sop_text,
+                        )
+                    except Exception as e:
+                        show_busy_error(e, context="Format SOP to required Markdown")
+
+                st.session_state.last_sop_text = sop_text
+                st.session_state.current_sop_text = sop_text
+                st.success("SOP generated. See 'Current SOP' below.")
+
+elif active_page == "Library":
+    st.subheader("SOP Library")
+    q = st.text_input("Search", value="", placeholder="Search by title or template…")
+    docs = list_sop_docs(tenant_id=TENANT_ID, query=q, limit=200)
+    if not docs:
+        st.info("No SOPs yet.")
+    else:
+        labels = [
+            f'{d["title"]} · {d["template_name"]} · v{d["latest_version"]} · {(d["latest_status"] or "draft").replace("_"," ")}'
+            for d in docs
+        ]
+        sel = st.selectbox("Open SOP", options=list(range(len(docs))), format_func=lambda i: labels[int(i)], index=0)
+        doc = docs[int(sel)]
+        st.session_state.current_sop_doc_id = doc["id"]
+        st.session_state.last_inferred_topic = doc["title"]
+        st.session_state.current_sop_text = doc["latest_text"] or ""
+        st.markdown(f'**Latest:** v{doc["latest_version"]} · {(doc["latest_status"] or "draft").replace("_"," ")}')
+        st.markdown(st.session_state.current_sop_text or "")
+
+        with st.expander("Versions", expanded=False):
+            versions = load_doc_versions(tenant_id=TENANT_ID, sop_doc_id=int(doc["id"]), limit=50)
+            v_labels = [
+                f'v{v["version"]} · {str(v["status"]).replace("_"," ")} · {(v["ts"] or "")[:19].replace("T"," ")} · {v.get("source","")}'
+                for v in versions
+            ]
+            v_a = st.selectbox("Version A", options=list(range(len(versions))), format_func=lambda i: v_labels[int(i)], index=0, key="lib_diff_a")
+            v_b = st.selectbox("Version B", options=list(range(len(versions))), format_func=lambda i: v_labels[int(i)], index=min(1, len(versions) - 1), key="lib_diff_b")
+            if st.button("Show diff", key="lib_show_diff"):
+                st.code(diff_text(versions[int(v_a)]["sop_text"], versions[int(v_b)]["sop_text"]))
 
 
 # --- Persistent SOP display (state management) ---
