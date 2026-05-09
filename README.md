@@ -22,6 +22,14 @@ APP_ACCESS_PASSWORD = "change-me"
 GROQ_API_KEY = "gsk_your_key_here"
 ```
 
+### Self-service signup (SaaS)
+
+By default, the login screen has **Create workspace**: visitors can register a new organization (tenant) and become admin. Set in secrets to disable:
+
+```toml
+SELF_SIGNUP_ENABLED = false
+```
+
 ### SaaS mode (recommended)
 
 For client deployments, use a real database and login instead of a shared password.
@@ -90,6 +98,7 @@ Use this before going live (Streamlit Cloud: **App settings → Secrets**; local
 | `DATABASE_URL` | **Yes** (prod) | PostgreSQL URL as above. Omit only for local SQLite. |
 | `BOOTSTRAP_*` or first admin | **Yes** (recommended) | Set `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD` (and optionally tenant slug/name). On each app load, if that email **does not** exist in the DB yet, the app creates an admin user on Postgres (Neon). Alternate secret names: `bootstrap_admin_email`, `database_url`, etc. Or use the in-app “Create first admin” form when there are zero users and no bootstrap secrets. |
 | `AUTH_DISABLED` | No | Leave **unset** or `false` in production. |
+| `SELF_SIGNUP_ENABLED` | No | Default **on**: “Create workspace” public signup. Set `false` for invite-only tenants. |
 | `DEBUG_ERRORS` | No | Leave **unset** or `false` in production; use `true` only while debugging. |
 | `APP_ACCESS_PASSWORD` | No | Optional extra gate **before** login; SaaS usually uses login only. |
 | `APP_LOG_PATH` | No | Overrides log file path (default uses system temp). |
