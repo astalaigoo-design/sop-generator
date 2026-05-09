@@ -147,6 +147,14 @@ After you push the latest code (including the self-signup default fix):
 6. In **Neon** (dashboard / query), confirm new rows in your tables (e.g. `tenants`, `users`) after signup.
 7. Set **`SHOW_DB_HINT = false`** or remove it, and keep **`DEBUG_ERRORS`** off in production.
 
+## Troubleshooting login (“Invalid email or password”)
+
+- Use the **same email** you registered with (check spelling; emails are stored lowercase).
+- Passwords are **trimmed** when checking—accidental leading/trailing spaces from paste should no longer break login.
+- Sign-up on **Streamlit Cloud + Neon** is a **different database** than local SQLite: accounts created locally do not exist in Neon until you create them there.
+- If your admin was created with **bootstrap secrets**, sign in with **`BOOTSTRAP_ADMIN_EMAIL`** / **`BOOTSTRAP_ADMIN_PASSWORD`** exactly as in Secrets (after trimming).
+- Temporary diagnostics: add **`DEBUG_LOGIN = true`** to Streamlit Secrets, retry sign-in, open the **Login debug** expander (then remove the secret).
+
 ## Notes
 
 - Never commit real secrets. This repo gitignores `.streamlit/secrets.toml` and `.streamlit/secrets.local.toml`.
