@@ -163,7 +163,18 @@ def _coerce_int(value: object, default: int) -> int:
         return default
 
 
-_PWD = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_PWD = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+
+def _hash_password(password: str) -> str:
+    return _PWD.hash(password or "")
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return _PWD.verify(password or "", password_hash)
+    except Exception:
+        return False
 
 
 class Base(DeclarativeBase):
@@ -360,7 +371,7 @@ def _ensure_bootstrap_admin() -> None:
         s.add(t)
         s.flush()
 
-        u = User(tenant_id=t.id, email=email, password_hash=_PWD.hash(pwd), role="admin", is_active=True)
+        u = User(tenant_id=t.id, email=email, password_hash=_hash_password(pwd), role="admin", is_active=True)
         s.add(u)
         s.add(TenantSettings(tenant_id=t.id))
         # Default quotas (override via env/secrets at runtime if desired)
@@ -428,7 +439,7 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                             u = User(
                                 tenant_id=t.id,
                                 email=email_n,
-                                password_hash=_PWD.hash(pwd),
+                                password_hash=_hash_password(pwd),
                                 role="admin",
                                 is_active=True,
                             )
@@ -448,7 +459,7 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                 email_n = _normalize_email(email)
                 with _db() as s:
                     u = s.execute(select(User).where(User.email == email_n, User.is_active == True)).scalar_one_or_none()
-                    if u is None or not _PWD.verify(pwd, u.password_hash):
+                    if u is None or not _verify_password(pwd, u.password_hash):
                         st.error("Invalid email or password.")
                     else:
                         st.session_state.auth_user = {
@@ -1463,7 +1474,7 @@ def create_user(
             User(
                 tenant_id=tenant_id,
                 email=email_n,
-                password_hash=_PWD.hash(password),
+                password_hash=_hash_password(password),
                 role=role_n,
                 is_active=True,
             )
@@ -1493,7 +1504,7 @@ def reset_user_password(*, tenant_id: int | None, user_id: int, new_password: st
         u = s.execute(select(User).where(User.tenant_id == tenant_id, User.id == int(user_id))).scalar_one_or_none()
         if u is None:
             return
-        u.password_hash = _PWD.hash(new_password)
+        u.password_hash = _hash_password(new_password)
         s.commit()
 
 
