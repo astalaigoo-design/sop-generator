@@ -189,6 +189,16 @@ def _coerce_int(value: object, default: int) -> int:
         return default
 
 
+def _normalize_email(email: str) -> str:
+    s = (email or "").strip().lower()
+    return unicodedata.normalize("NFC", s)
+
+
+def _normalize_password_input(password: str) -> str:
+    """Strip accidental spaces/newlines from pasted passwords (signup + login)."""
+    return (password or "").strip()
+
+
 _PWD = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
@@ -197,11 +207,17 @@ def _hash_password(password: str) -> str:
 
 
 def _verify_password(password: str, password_hash: str) -> bool:
+    """Verify password; try trimmed input first, then raw (legacy hashes from before strip fix)."""
+    ph = (password_hash or "").strip()
+    if not ph:
+        return False
     try:
-        ph = (password_hash or "").strip()
-        if not ph:
-            return False
-        return _PWD.verify(_normalize_password_input(password), ph)
+        if _PWD.verify(_normalize_password_input(password), ph):
+            return True
+        raw = password or ""
+        if raw != _normalize_password_input(password):
+            return bool(_PWD.verify(raw, ph))
+        return False
     except Exception:
         return False
 
@@ -215,7 +231,7 @@ def _verify_and_migrate_password(
 ) -> bool:
     """Verify password, and migrate legacy bcrypt hashes to pbkdf2_sha256 on success."""
     pw = _normalize_password_input(password)
-    ph = (password_hash or "").strip()
+    ph = password_hash or ""
 
     # First try current scheme.
     if _verify_password(pw, ph):
@@ -399,37 +415,26 @@ class DailyUsage(Base):
 
 
 @st.cache_resource
-def _engine_for_url(database_url: str):
-    """One engine per URL. Without this, `@st.cache_resource` on a no-arg `_engine()` caches the
-    **first** connection forever — so SQLite from an early rerun blocks Neon (`DATABASE_URL`) and
-    login/signup hit different DBs than expected on Streamlit Cloud.
-    """
+def _engine(database_url: str):
+    """One engine per DATABASE_URL. Uncached URL would pin SQLite forever when secrets load late."""
     url = (database_url or "").strip()
-    connect_args = {"check_same_thread": False} if url.lower().startswith("sqlite") else {}
-    return create_engine(url, pool_pre_ping=True, connect_args=connect_args)
-
-
-def _engine():
-    return _engine_for_url(_database_url())
+    if not url:
+        url = "sqlite+pysqlite:///./fluency.db"
+    # Avoid noisy check_same_thread issues for sqlite under Streamlit.
+    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    # Neon/serverless Postgres often closes idle connections — recycle pools.
+    kw = dict(pool_pre_ping=True, connect_args=connect_args)
+    if url.startswith("postgresql") or url.startswith("postgres"):
+        kw["pool_recycle"] = 300
+    return create_engine(url, **kw)
 
 
 def _init_db() -> None:
-    eng = _engine()
-    Base.metadata.create_all(eng)
+    Base.metadata.create_all(_engine(_database_url()))
 
 
 def _db() -> Session:
-    return Session(_engine())
-
-
-def _normalize_email(email: str) -> str:
-    s = unicodedata.normalize("NFC", (email or "").strip()).lower()
-    return s
-
-
-def _normalize_password_input(password: str) -> str:
-    """Strip accidental spaces/newlines from pasted passwords (signup + login)."""
-    return (password or "").strip()
+    return Session(_engine(_database_url()))
 
 
 def _ensure_tenant_settings_and_quota(s: Session, *, tenant_id: int) -> None:
@@ -606,11 +611,6 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
         hint_raw = _secret_first("SHOW_DB_HINT", "SHOW_DEPLOYMENT_INFO")
         if hint_raw is not None and str(hint_raw).strip() != "" and _coerce_bool(hint_raw, False):
             st.caption(f"Deployment DB: **{_database_backend_label()}**")
-            if _database_url().strip().lower().startswith("sqlite"):
-                st.warning(
-                    "SQLite is active — **`DATABASE_URL`** for Postgres may be ignored until you "
-                    "**redeploy/reboot** after setting secrets (engine cache is keyed by URL in current builds)."
-                )
     except Exception:
         pass
 
@@ -2354,11 +2354,6 @@ with st.sidebar:
     with st.expander("Usage & quotas (today)", expanded=False):
         st.caption(f"Date: {_today_key()}")
         st.caption(f"Database: {_database_backend_label()}")
-        if _database_url().strip().lower().startswith("sqlite"):
-            st.warning(
-                "This app is using **local SQLite**. On Streamlit Cloud, set **`DATABASE_URL`** "
-                "to Neon Postgres and **reboot** the app so login/signup use the same database."
-            )
         st.write(
             {
                 "generations_used": usage.get("generate", 0),
