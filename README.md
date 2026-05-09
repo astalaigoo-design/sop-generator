@@ -24,7 +24,7 @@ GROQ_API_KEY = "gsk_your_key_here"
 
 ### Self-service signup (SaaS)
 
-By default, the login screen has **Create workspace**: visitors can register a new organization (tenant) and become admin. Set in secrets to disable:
+By default, the login screen has **Create workspace**: visitors can register a new organization (tenant) and become admin. Omit the key to leave signup **enabled**. Set explicitly to disable:
 
 ```toml
 SELF_SIGNUP_ENABLED = false
