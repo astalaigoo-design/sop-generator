@@ -36,6 +36,7 @@ from sqlalchemy import (
     create_engine,
     select,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 
@@ -478,12 +479,73 @@ def _login_required() -> bool:
     return not _coerce_bool(_secret_or_env("AUTH_DISABLED"), False)
 
 
+def _self_signup_allowed() -> bool:
+    """SaaS self-service ‘Create workspace’. Set SELF_SIGNUP_ENABLED=false to disable."""
+    return _coerce_bool(_secret_first("SELF_SIGNUP_ENABLED", "ALLOW_SELF_SIGNUP"), True)
+
+
+def _sanitize_tenant_slug(raw: str) -> str:
+    s = (raw or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return (s[:118] if s else "workspace")
+
+
+def register_workspace(
+    *,
+    slug_raw: str,
+    display_name: str,
+    email: str,
+    password: str,
+) -> tuple[bool, str]:
+    """Create a new tenant + first admin (self-service signup)."""
+    slug = _sanitize_tenant_slug(slug_raw)
+    if len(slug) < 2:
+        return False, "Workspace URL must be at least 2 characters (letters or numbers)."
+    name = (display_name or "").strip() or slug.replace("-", " ").title()
+    email_n = _normalize_email(email)
+    if not email_n:
+        return False, "Enter a valid email address."
+    if not password or len(password) < 8:
+        return False, "Password must be at least 8 characters."
+
+    _init_db()
+    try:
+        with _db() as s:
+            if s.execute(select(User.id).where(User.email == email_n)).scalar_one_or_none() is not None:
+                return False, "That email is already registered. Sign in instead."
+            if s.execute(select(Tenant.id).where(Tenant.slug == slug)).scalar_one_or_none() is not None:
+                return False, "That workspace URL is already taken. Choose another."
+
+            t = Tenant(slug=slug, name=name)
+            s.add(t)
+            s.flush()
+            _ensure_tenant_settings_and_quota(s, tenant_id=t.id)
+            s.add(
+                User(
+                    tenant_id=t.id,
+                    email=email_n,
+                    password_hash=_hash_password(password),
+                    role="admin",
+                    is_active=True,
+                )
+            )
+            s.commit()
+    except IntegrityError:
+        return False, "Workspace URL or email conflict. Try a different URL or sign in."
+    except Exception as ex:
+        log_exception(ex, context="Register workspace")
+        return False, "Could not create workspace. Try again or contact support."
+
+    return True, "Workspace created. Sign in with your email and password."
+
+
 def _current_user() -> dict | None:
     return st.session_state.get("auth_user")
 
 
 def _require_auth_ui(brand: dict[str, object]) -> None:
-    """Login screen + optional bootstrap setup."""
+    """Login screen + optional bootstrap setup + self-service signup."""
     if not _login_required():
         st.session_state.auth_user = {
             "user_id": None,
@@ -501,14 +563,16 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
         return
 
     st.title(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
-    st.caption("Sign in to continue.")
+    st.caption("Sign in or create your organization workspace.")
 
-    # If still no users exist, allow interactive bootstrap.
     with _db() as s:
         any_user = s.execute(select(User.id).limit(1)).scalar_one_or_none()
 
-    if any_user is None:
-        st.warning("No admin user exists yet. Create the first admin for this workspace.")
+    signup_ok = _self_signup_allowed()
+
+    # No users yet and signup disabled: keep manual one-time bootstrap (no secrets).
+    if any_user is None and not signup_ok:
+        st.warning("No admin exists yet. Create the first admin (or set bootstrap secrets / enable self-signup).")
         with st.form("bootstrap_admin"):
             tenant_slug = st.text_input("Tenant slug", value="default")
             tenant_name = st.text_input("Tenant name", value="Default Tenant")
@@ -524,6 +588,7 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                             t = Tenant(slug=tenant_slug.strip(), name=tenant_name.strip() or tenant_slug.strip())
                             s.add(t)
                             s.flush()
+                            _ensure_tenant_settings_and_quota(s, tenant_id=t.id)
                             u = User(
                                 tenant_id=t.id,
                                 email=email_n,
@@ -532,38 +597,74 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                                 is_active=True,
                             )
                             s.add(u)
-                            s.add(TenantSettings(tenant_id=t.id))
                             s.commit()
                         st.success("Admin created. Please sign in.")
                     except Exception as e:
                         show_busy_error(e, context="Bootstrap admin")
         st.stop()
 
-    with st.form("login"):
-        email = st.text_input("Email")
-        pwd = st.text_input("Password", type="password")
-        if st.form_submit_button("Sign in"):
-            try:
-                email_n = _normalize_email(email)
-                with _db() as s:
-                    u = s.execute(select(User).where(User.email == email_n, User.is_active == True)).scalar_one_or_none()
-                    if u is None or not _verify_and_migrate_password(
-                        tenant_id=u.tenant_id,
-                        user_id=u.id,
-                        password=pwd,
-                        password_hash=u.password_hash,
-                    ):
-                        st.error("Invalid email or password.")
+    tab_signin, tab_signup = st.tabs(["Sign in", "Create workspace"])
+
+    with tab_signin:
+        with st.form("login"):
+            email = st.text_input("Email", key="login_email")
+            pwd = st.text_input("Password", type="password", key="login_pwd")
+            if st.form_submit_button("Sign in"):
+                try:
+                    email_n = _normalize_email(email)
+                    with _db() as s:
+                        u = s.execute(select(User).where(User.email == email_n, User.is_active == True)).scalar_one_or_none()
+                        if u is None or not _verify_and_migrate_password(
+                            tenant_id=u.tenant_id,
+                            user_id=u.id,
+                            password=pwd,
+                            password_hash=u.password_hash,
+                        ):
+                            st.error("Invalid email or password.")
+                        else:
+                            st.session_state.auth_user = {
+                                "user_id": u.id,
+                                "tenant_id": u.tenant_id,
+                                "email": u.email,
+                                "role": u.role,
+                            }
+                            st.rerun()
+                except Exception as e:
+                    show_busy_error(e, context="Login")
+
+    with tab_signup:
+        if not signup_ok:
+            st.info(
+                "Self-service signup is turned off (`SELF_SIGNUP_ENABLED=false`). "
+                "Ask an administrator for an account or use bootstrap secrets."
+            )
+        else:
+            st.caption("Start a new workspace. You will be the organization admin.")
+            with st.form("signup_workspace"):
+                ws_slug = st.text_input(
+                    "Workspace URL",
+                    placeholder="acme-corp",
+                    help="Short id: letters, numbers, hyphens. Must be unique.",
+                    key="su_slug",
+                )
+                ws_name = st.text_input("Organization name", placeholder="Acme Corp", key="su_org")
+                su_email = st.text_input("Your email", key="su_email")
+                su_pwd = st.text_input("Password (min 8 characters)", type="password", key="su_pwd")
+                su_pwd2 = st.text_input("Confirm password", type="password", key="su_pwd2")
+                if st.form_submit_button("Create workspace"):
+                    if su_pwd != su_pwd2:
+                        st.error("Passwords do not match.")
                     else:
-                        st.session_state.auth_user = {
-                            "user_id": u.id,
-                            "tenant_id": u.tenant_id,
-                            "email": u.email,
-                            "role": u.role,
-                        }
-                        st.rerun()
-            except Exception as e:
-                show_busy_error(e, context="Login")
+                        ok, msg = register_workspace(
+                            slug_raw=ws_slug,
+                            display_name=ws_name,
+                            email=su_email,
+                            password=su_pwd,
+                        )
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
     st.stop()
 
 
