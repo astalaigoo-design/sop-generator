@@ -86,6 +86,27 @@ def _load_local_secrets() -> dict[str, object]:
 
 _LOCAL_SECRETS = _load_local_secrets()
 
+# --- Logging + safe error UX (must be defined before auth) ---
+APP_LOG_PATH = os.path.join(".streamlit", "app.log")
+
+
+def log_exception(ex: Exception, *, context: str) -> None:
+    """Write exception details to a local log file for support/debugging."""
+    try:
+        os.makedirs(os.path.dirname(APP_LOG_PATH), exist_ok=True)
+        with open(APP_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.now(timezone.utc).isoformat()}] {context}\n")
+            f.write("".join(traceback.format_exception(type(ex), ex, ex.__traceback__)))
+    except Exception:
+        # Never let logging break the app UX.
+        pass
+
+
+def show_busy_error(ex: Exception | None = None, *, context: str = "Unhandled error") -> None:
+    if ex is not None:
+        log_exception(ex, context=context)
+    st.error("Something went wrong. Please try again. If this continues, contact support.")
+
 
 def _secret_or_env(name: str) -> str | None:
     """Read a scalar secret from secrets.toml when present; fall back to the same-named env var."""
@@ -871,7 +892,7 @@ def get_groq_api_key() -> str | None:
                 k = _normalize_secret_value(section["api_key"])
                 if k:
                     return k
-    except StreamlitSecretNotFoundError:
+    except (StreamlitSecretNotFoundError, OSError, PermissionError):
         pass
 
     return _normalize_secret_value(os.getenv("GROQ_API_KEY"))
