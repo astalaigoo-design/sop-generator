@@ -88,7 +88,7 @@ Use this before going live (Streamlit Cloud: **App settings → Secrets**; local
 |------------------|------------|--------|
 | `GROQ_API_KEY` | **Yes** | LLM + optional STT/vision via Groq. |
 | `DATABASE_URL` | **Yes** (prod) | PostgreSQL URL as above. Omit only for local SQLite. |
-| `BOOTSTRAP_*` or first admin | **Yes** (first user) | Either set `BOOTSTRAP_TENANT_SLUG`, `BOOTSTRAP_TENANT_NAME`, `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD` **or** use the in-app “Create first admin” form when the DB has no users. |
+| `BOOTSTRAP_*` or first admin | **Yes** (recommended) | Set `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD` (and optionally tenant slug/name). On each app load, if that email **does not** exist in the DB yet, the app creates an admin user on Postgres (Neon). Alternate secret names: `bootstrap_admin_email`, `database_url`, etc. Or use the in-app “Create first admin” form when there are zero users and no bootstrap secrets. |
 | `AUTH_DISABLED` | No | Leave **unset** or `false` in production. |
 | `DEBUG_ERRORS` | No | Leave **unset** or `false` in production; use `true` only while debugging. |
 | `APP_ACCESS_PASSWORD` | No | Optional extra gate **before** login; SaaS usually uses login only. |
