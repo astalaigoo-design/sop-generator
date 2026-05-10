@@ -13,4 +13,6 @@ backgroundColor = "#0B0F1A"
 secondaryBackgroundColor = "#121827"
 textColor = "#E6EAF2"
 font = "sans serif"
+
 [client]
+# Logo lives in secrets under [branding] logo_path / logo_url — see .streamlit/secrets.toml.example
