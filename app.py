@@ -69,17 +69,34 @@ _BRANDING_KEYS = frozenset(DEFAULT_BRANDING.keys())
 def _normalize_secret_value(value: object) -> str | None:
     if value is None:
         return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
     s = str(value).strip()
     return s or None
+
+
+def _deep_merge_dict(base: dict[str, object], overlay: dict[str, object]) -> dict[str, object]:
+    """Merge TOML tables: overlay wins; nested dicts merge recursively."""
+    out = dict(base)
+    for k, v in overlay.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge_dict(out[k], v)  # type: ignore[arg-type]
+        else:
+            out[k] = v
+    return out
 
 
 def _load_local_secrets() -> dict[str, object]:
     """Load local secrets from disk (dev convenience).
 
     Streamlit Cloud uses `st.secrets` and does not rely on these files.
-    Locally, this allows password protection even if `.streamlit/secrets.toml`
-    can't be created (e.g., name collision with an existing folder).
+    Merges `.streamlit/secrets.toml` then `.streamlit/secrets.local.toml` so local
+    overrides (e.g. REQUIRE_EMAIL_VERIFICATION) apply even when both files exist.
+
+    Note: Streamlit itself only auto-loads `secrets.toml` into `st.secrets`; keys
+    that exist only in `secrets.local.toml` are read via this merged dict in `_secret_or_env`.
     """
+    merged: dict[str, object] = {}
     candidates = [
         os.path.join(".streamlit", "secrets.toml"),
         os.path.join(".streamlit", "secrets.local.toml"),
@@ -90,10 +107,11 @@ def _load_local_secrets() -> dict[str, object]:
         try:
             with open(path, "rb") as f:
                 data = tomllib.load(f)
-            return data if isinstance(data, dict) else {}
+            if isinstance(data, dict):
+                merged = _deep_merge_dict(merged, data)
         except (OSError, tomllib.TOMLDecodeError):
             continue
-    return {}
+    return merged
 
 
 _LOCAL_SECRETS = _load_local_secrets()
