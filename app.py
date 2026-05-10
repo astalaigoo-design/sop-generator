@@ -1493,26 +1493,53 @@ def render_svg_data_uri(svg: str) -> str:
     return f"data:image/svg+xml;base64,{b64}"
 
 
+def _resolve_local_logo_path(path_str: str) -> Path | None:
+    """Resolve logo_path to an existing file (repo root, .streamlit/, then cwd)."""
+    raw = (path_str or "").strip()
+    if not raw:
+        return None
+    repo_root = Path(__file__).resolve().parent
+    p_in = Path(raw)
+    candidates: list[Path] = []
+    if p_in.is_absolute():
+        candidates.append(p_in)
+    else:
+        candidates.extend(
+            [
+                repo_root / raw,
+                repo_root / ".streamlit" / raw,
+                Path(os.getcwd()) / raw,
+                Path(os.getcwd()) / ".streamlit" / raw,
+            ]
+        )
+    for c in candidates:
+        try:
+            if c.is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
+
 def resolve_brand_logo_url(brand: dict[str, object]) -> str:
     url = str(brand.get("logo_url") or "").strip()
     if url:
         return url
-    path = str(brand.get("logo_path") or "").strip()
-    if path:
-        p = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
-        if os.path.isfile(p):
-            with open(p, "rb") as f:
-                raw = f.read()
-            ext = os.path.splitext(p)[1].lower()
-            mime = {
-                ".png": "image/png",
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".webp": "image/webp",
-                ".svg": "image/svg+xml",
-            }.get(ext, "application/octet-stream")
-            b64 = base64.b64encode(raw).decode("ascii")
-            return f"data:{mime};base64,{b64}"
+    path_str = str(brand.get("logo_path") or "").strip()
+    resolved = _resolve_local_logo_path(path_str)
+    if resolved is not None:
+        with open(resolved, "rb") as f:
+            raw = f.read()
+        ext = resolved.suffix.lower()
+        mime = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+        }.get(ext, "application/octet-stream")
+        b64 = base64.b64encode(raw).decode("ascii")
+        return f"data:{mime};base64,{b64}"
     return render_svg_data_uri(SVG_CODE)
 
 
