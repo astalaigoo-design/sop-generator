@@ -306,6 +306,10 @@ class User(Base):
     email_verified: Mapped[bool] = mapped_column(Boolean, default=True)
     verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
     verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Per-user free tier (PDF/DOCX share one export counter). If paywall_exempt, limits are skipped.
+    free_generations_used: Mapped[int] = mapped_column(Integer, default=0)
+    free_exports_used: Mapped[int] = mapped_column(Integer, default=0)
+    paywall_exempt: Mapped[bool] = mapped_column(Boolean, default=False)
 
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
@@ -466,10 +470,30 @@ def _migrate_user_verification_columns(engine) -> None:
                 conn.execute(text("ALTER TABLE users ADD COLUMN verification_expires_at TIMESTAMP WITH TIME ZONE"))
 
 
+def _migrate_user_paywall_columns(engine) -> None:
+    try:
+        insp = inspect(engine)
+        cols = {c["name"] for c in insp.get_columns("users")}
+    except Exception:
+        return
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if "free_generations_used" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN free_generations_used INTEGER DEFAULT 0"))
+        if "free_exports_used" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN free_exports_used INTEGER DEFAULT 0"))
+        if "paywall_exempt" not in cols:
+            if dialect == "sqlite":
+                conn.execute(text("ALTER TABLE users ADD COLUMN paywall_exempt BOOLEAN DEFAULT 0"))
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN paywall_exempt BOOLEAN DEFAULT FALSE"))
+
+
 def _init_db() -> None:
     eng = _engine(_database_url())
     Base.metadata.create_all(eng)
     _migrate_user_verification_columns(eng)
+    _migrate_user_paywall_columns(eng)
 
 
 def _db() -> Session:
@@ -2382,6 +2406,185 @@ def check_and_consume_quota(*, tenant_id: int | None, action: str, amount: int =
         return True, f"Quota ok. Remaining today: {remaining}."
 
 
+def _free_tier_globally_disabled() -> bool:
+    v = (_secret_or_env("FREE_TIER_DISABLED") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _free_tier_max_generations() -> int:
+    return max(0, _coerce_int(_secret_or_env("FREE_TIER_MAX_GENERATIONS"), 3))
+
+
+def _free_tier_max_exports() -> int:
+    return max(0, _coerce_int(_secret_or_env("FREE_TIER_MAX_DOWNLOADS"), 1))
+
+
+def _credits_purchase_url() -> str:
+    return (_secret_or_env("CREDITS_PURCHASE_URL") or "").strip()
+
+
+def _user_paywall_exempt(user_id: int | None) -> bool:
+    if user_id is None:
+        return True
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        if u is None:
+            return True
+        return bool(getattr(u, "paywall_exempt", False))
+
+
+def render_paywall_cta() -> None:
+    url = _credits_purchase_url()
+    if url:
+        st.markdown(f"[Purchase credits or upgrade]({url})")
+    else:
+        st.caption("Contact your administrator to unlock more usage.")
+
+
+def free_tier_status_caption(user_id: int | None) -> str | None:
+    if user_id is None or _free_tier_globally_disabled() or _user_paywall_exempt(user_id):
+        return None
+    max_g = _free_tier_max_generations()
+    max_e = _free_tier_max_exports()
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        gu = int(getattr(u, "free_generations_used", 0) or 0) if u is not None else 0
+        eu = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
+    rg = max(0, max_g - gu)
+    re = max(0, max_e - eu)
+    return f"Free tier: **{rg}** generation(s) and **{re}** PDF/DOCX export(s) remaining."
+
+
+def check_user_generation_budget(user_id: int | None) -> tuple[bool, str]:
+    if user_id is None or _free_tier_globally_disabled():
+        return True, ""
+    if _user_paywall_exempt(user_id):
+        return True, ""
+    max_g = _free_tier_max_generations()
+    if max_g <= 0:
+        return False, "SOP generation is disabled for your account."
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        used = int(getattr(u, "free_generations_used", 0) or 0) if u is not None else 0
+    if used >= max_g:
+        return (
+            False,
+            "You've used all free SOP generations for your account. Purchase credits to generate more.",
+        )
+    return True, ""
+
+
+def record_user_generation_success(user_id: int | None) -> None:
+    if user_id is None or _free_tier_globally_disabled():
+        return
+    if _user_paywall_exempt(user_id):
+        return
+    max_g = _free_tier_max_generations()
+    if max_g <= 0:
+        return
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        if u is None:
+            return
+        cur = int(getattr(u, "free_generations_used", 0) or 0)
+        if cur >= max_g:
+            return
+        u.free_generations_used = cur + 1
+        s.commit()
+
+
+def check_user_export_budget(user_id: int | None) -> tuple[bool, str]:
+    if user_id is None or _free_tier_globally_disabled():
+        return True, ""
+    if _user_paywall_exempt(user_id):
+        return True, ""
+    max_e = _free_tier_max_exports()
+    if max_e <= 0:
+        return False, "PDF/DOCX downloads are disabled for your account."
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        used = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
+    if used >= max_e:
+        return (
+            False,
+            "You've used your free PDF/DOCX download. Purchase credits to export again.",
+        )
+    return True, ""
+
+
+def try_consume_export_click(user_id: int | None) -> None:
+    """Increment PDF/DOCX export usage when the user clicks a download button (on_click)."""
+    if user_id is None or _free_tier_globally_disabled():
+        return
+    if _user_paywall_exempt(user_id):
+        return
+    max_e = _free_tier_max_exports()
+    if max_e <= 0:
+        return
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        if u is None:
+            return
+        cur = int(getattr(u, "free_exports_used", 0) or 0)
+        if cur >= max_e:
+            return
+        u.free_exports_used = cur + 1
+        s.commit()
+
+
+def render_paywalled_pdf_docx_downloads(
+    *,
+    pdf_bytes: bytes,
+    docx_bytes: bytes,
+    safe_name: str,
+    pdf_label: str,
+    docx_label: str,
+    pdf_key: str,
+    docx_key: str,
+    user_id: int | None,
+    pdf_filename: str | None = None,
+    docx_filename: str | None = None,
+) -> None:
+    allow, msg = check_user_export_budget(user_id)
+    if not allow:
+        st.warning(msg)
+        render_paywall_cta()
+        return
+
+    def _on_export() -> None:
+        try_consume_export_click(user_id)
+
+    pfn = pdf_filename or f"{safe_name}.pdf"
+    dfn = docx_filename or f"{safe_name}.docx"
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if pdf_bytes:
+            st.download_button(
+                pdf_label,
+                data=pdf_bytes,
+                file_name=pfn,
+                mime="application/pdf",
+                key=pdf_key,
+                on_click=_on_export,
+            )
+    with col_b:
+        if docx_bytes:
+            st.download_button(
+                docx_label,
+                data=docx_bytes,
+                file_name=dfn,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=docx_key,
+                on_click=_on_export,
+            )
+
+
 def save_history(items: list[dict]) -> None:
     # No-op: history is DB-backed now.
     return
@@ -3525,6 +3728,14 @@ if active_page == "Generator":
     _tag = header_tagline(_brand)
     if _tag:
         st.caption(_tag)
+    _ft_cap = free_tier_status_caption(USER_ID)
+    if _ft_cap:
+        st.caption(_ft_cap)
+
+    _ft_ok_gen, _ = check_user_generation_budget(USER_ID)
+    _ft_disabled = _free_tier_globally_disabled()
+    _ft_exempt = _user_paywall_exempt(USER_ID)
+    hero_gen_disabled = not api_key or ((not _ft_disabled and not _ft_exempt) and not _ft_ok_gen)
 
     generate_btn = False
     tab_text, tab_voice, tab_vision = st.tabs(
@@ -3547,7 +3758,7 @@ if active_page == "Generator":
                     "✨ Generate Standard Operating Procedure",
                     type="primary",
                     use_container_width=True,
-                    disabled=not api_key,
+                    disabled=hero_gen_disabled,
                     key="hero_generate_sop",
                 )
 
@@ -3676,85 +3887,92 @@ if active_page == "Generator":
         if not notes.strip():
             st.error("Please paste your notes (or a transcript) first.")
         else:
-            with st.spinner("Writing SOP..."):
-                try:
-                    ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="generate", amount=1)
-                    if not ok:
-                        st.error(msg)
-                        st.stop()
-                    inferred_topic = f"{template_name} SOP"
-                    # Build company brain context for this generation (stored in session_state).
-                    company_docs = st.session_state.get("company_manual_docs", []) or []
-                    st.session_state.company_rules_context = ""
-                    if company_docs:
-                        query = f"{template_name}\n{inferred_topic}\n{audience}\n{tools_used}\n{compliance_standard}\n{notes}"
-                        snippets = retrieve_company_snippets(query=query, docs=company_docs, top_k=int(rag_top_k))
-                        if snippets:
-                            ctx_lines = []
-                            for s in snippets:
-                                ctx_lines.append(
-                                    f"- ({s['doc']} #chunk{s['chunk_index']}) {s['text']}"
-                                )
-                            st.session_state.company_rules_context = "\n".join(ctx_lines)
-
-                    prompt = build_prompt_for_template(
-                        template_name,
-                        inferred_topic,
-                        notes,
-                        audience=audience.strip() or "General staff",
-                        tools_used=tools_used.strip(),
-                        compliance_standard=compliance_standard.strip(),
-                        strictness=strictness,
-                        tone=tone,
-                        include_definitions=include_definitions,
-                        include_safety_compliance=include_safety_compliance,
-                        include_records=include_records,
-                        include_checklist=include_checklist,
-                    )
-                    sop_text = generate_sop_cached(
-                        api_key=api_key,
-                        model=model,
-                        temperature=float(temperature),
-                        prompt=prompt,
-                    )
-                    st.session_state.last_sop_text = sop_text
-                    st.session_state.last_inferred_topic = inferred_topic
-                    # Always set the "current" SOP so it persists across any subsequent button clicks.
-                    st.session_state.current_sop_text = sop_text
-
-                    add_to_history(
-                        tenant_id=TENANT_ID,
-                        user_id=USER_ID,
-                        role=USER_ROLE,
-                        entry={
-                            "ts": datetime.now(timezone.utc).isoformat(),
-                            "label": inferred_topic,
-                            "template_name": template_name,
-                            "source": "generated",
-                            "sop_text": sop_text,
-                            "sop_sha256": sop_fingerprint(sop_text),
-                            "sop_doc_id": st.session_state.get("current_sop_doc_id"),
-                        },
-                    )
-                except Exception as e:
-                    show_busy_error(e, context="Generate SOP")
-                    sop_text = ""
-
-            if sop_text:
-                # Enforce strict Markdown structure. If the model drifts, auto-fix it once.
-                if not is_valid_sop_markdown(sop_text):
+            ok_usr, msg_usr = check_user_generation_budget(USER_ID)
+            if not ok_usr:
+                st.error(msg_usr)
+                render_paywall_cta()
+            else:
+                with st.spinner("Writing SOP..."):
                     try:
-                        sop_text = format_sop_to_required_markdown_cached(
+                        ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="generate", amount=1)
+                        if not ok:
+                            st.error(msg)
+                            st.stop()
+                        inferred_topic = f"{template_name} SOP"
+                        # Build company brain context for this generation (stored in session_state).
+                        company_docs = st.session_state.get("company_manual_docs", []) or []
+                        st.session_state.company_rules_context = ""
+                        if company_docs:
+                            query = f"{template_name}\n{inferred_topic}\n{audience}\n{tools_used}\n{compliance_standard}\n{notes}"
+                            snippets = retrieve_company_snippets(query=query, docs=company_docs, top_k=int(rag_top_k))
+                            if snippets:
+                                ctx_lines = []
+                                for s in snippets:
+                                    ctx_lines.append(
+                                        f"- ({s['doc']} #chunk{s['chunk_index']}) {s['text']}"
+                                    )
+                                st.session_state.company_rules_context = "\n".join(ctx_lines)
+
+                        prompt = build_prompt_for_template(
+                            template_name,
+                            inferred_topic,
+                            notes,
+                            audience=audience.strip() or "General staff",
+                            tools_used=tools_used.strip(),
+                            compliance_standard=compliance_standard.strip(),
+                            strictness=strictness,
+                            tone=tone,
+                            include_definitions=include_definitions,
+                            include_safety_compliance=include_safety_compliance,
+                            include_records=include_records,
+                            include_checklist=include_checklist,
+                        )
+                        sop_text = generate_sop_cached(
                             api_key=api_key,
                             model=model,
-                            sop_text=sop_text,
+                            temperature=float(temperature),
+                            prompt=prompt,
+                        )
+                        if sop_text and str(sop_text).strip():
+                            record_user_generation_success(USER_ID)
+                        st.session_state.last_sop_text = sop_text
+                        st.session_state.last_inferred_topic = inferred_topic
+                        # Always set the "current" SOP so it persists across any subsequent button clicks.
+                        st.session_state.current_sop_text = sop_text
+
+                        add_to_history(
+                            tenant_id=TENANT_ID,
+                            user_id=USER_ID,
+                            role=USER_ROLE,
+                            entry={
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                                "label": inferred_topic,
+                                "template_name": template_name,
+                                "source": "generated",
+                                "sop_text": sop_text,
+                                "sop_sha256": sop_fingerprint(sop_text),
+                                "sop_doc_id": st.session_state.get("current_sop_doc_id"),
+                            },
                         )
                     except Exception as e:
-                        show_busy_error(e, context="Format SOP to required Markdown")
+                        show_busy_error(e, context="Generate SOP")
+                        sop_text = ""
 
-                st.session_state.last_sop_text = sop_text
-                st.session_state.current_sop_text = sop_text
-                st.success("SOP generated. See 'Current SOP' below.")
+                if sop_text:
+                    # Enforce strict Markdown structure. If the model drifts, auto-fix it once.
+                    if not is_valid_sop_markdown(sop_text):
+                        try:
+                            sop_text = format_sop_to_required_markdown_cached(
+                                api_key=api_key,
+                                model=model,
+                                sop_text=sop_text,
+                            )
+                        except Exception as e:
+                            show_busy_error(e, context="Format SOP to required Markdown")
+
+                    st.session_state.last_sop_text = sop_text
+                    st.session_state.current_sop_text = sop_text
+                    st.success("SOP generated. See 'Current SOP' below.")
 
 elif active_page == "Library":
     st.title("📂 SOP Library")
@@ -3849,25 +4067,16 @@ if current_sop:
                 st.session_state.current_sop_text = st.session_state.get("last_sop_text", "") or current_sop
                 st.success("Reset.")
 
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        if current_pdf:
-            st.download_button(
-                "Download PDF",
-                data=current_pdf,
-                file_name=f"{safe_name}.pdf",
-                mime="application/pdf",
-                key=f"dl_pdf_current_{sop_fingerprint(current_sop)}",
-            )
-    with col_dl2:
-        if current_docx:
-            st.download_button(
-                "Download DOCX",
-                data=current_docx,
-                file_name=f"{safe_name}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key=f"dl_docx_current_{sop_fingerprint(current_sop)}",
-            )
+    render_paywalled_pdf_docx_downloads(
+        pdf_bytes=current_pdf,
+        docx_bytes=current_docx,
+        safe_name=safe_name,
+        pdf_label="Download PDF",
+        docx_label="Download DOCX",
+        pdf_key=f"dl_pdf_current_{sop_fingerprint(current_sop)}",
+        docx_key=f"dl_docx_current_{sop_fingerprint(current_sop)}",
+        user_id=USER_ID,
+    )
 
 
 # --- Step 2: Quality pass (Review & Fix) ---
@@ -3974,25 +4183,18 @@ if api_key and last_sop:
             log_exception(e, context="Prepare revised SOP DOCX")
             show_busy_error(e, context="Prepare revised SOP DOCX")
 
-        col_c, col_d = st.columns(2)
-        with col_c:
-            if pdf_bytes:
-                st.download_button(
-                    "Download Revised PDF",
-                    data=pdf_bytes,
-                    file_name=f"{safe_name}-revised.pdf",
-                    mime="application/pdf",
-                    key=f"dl_pdf_rev_{sop_fingerprint(sop_for_download)}",
-                )
-        with col_d:
-            if docx_bytes:
-                st.download_button(
-                    "Download Revised DOCX",
-                    data=docx_bytes,
-                    file_name=f"{safe_name}-revised.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    key=f"dl_docx_rev_{sop_fingerprint(sop_for_download)}",
-                )
+        render_paywalled_pdf_docx_downloads(
+            pdf_bytes=pdf_bytes,
+            docx_bytes=docx_bytes,
+            safe_name=safe_name,
+            pdf_label="Download Revised PDF",
+            docx_label="Download Revised DOCX",
+            pdf_key=f"dl_pdf_rev_{sop_fingerprint(sop_for_download)}",
+            docx_key=f"dl_docx_rev_{sop_fingerprint(sop_for_download)}",
+            user_id=USER_ID,
+            pdf_filename=f"{safe_name}-revised.pdf",
+            docx_filename=f"{safe_name}-revised.docx",
+        )
 
         st.markdown("### Rate the revised SOP")
         rating2 = st.radio(
