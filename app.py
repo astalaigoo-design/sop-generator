@@ -69,34 +69,17 @@ _BRANDING_KEYS = frozenset(DEFAULT_BRANDING.keys())
 def _normalize_secret_value(value: object) -> str | None:
     if value is None:
         return None
-    if isinstance(value, bool):
-        return "true" if value else "false"
     s = str(value).strip()
     return s or None
-
-
-def _deep_merge_dict(base: dict[str, object], overlay: dict[str, object]) -> dict[str, object]:
-    """Merge TOML tables: overlay wins; nested dicts merge recursively."""
-    out = dict(base)
-    for k, v in overlay.items():
-        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
-            out[k] = _deep_merge_dict(out[k], v)  # type: ignore[arg-type]
-        else:
-            out[k] = v
-    return out
 
 
 def _load_local_secrets() -> dict[str, object]:
     """Load local secrets from disk (dev convenience).
 
     Streamlit Cloud uses `st.secrets` and does not rely on these files.
-    Merges `.streamlit/secrets.toml` then `.streamlit/secrets.local.toml` so local
-    overrides (e.g. REQUIRE_EMAIL_VERIFICATION) apply even when both files exist.
-
-    Note: Streamlit itself only auto-loads `secrets.toml` into `st.secrets`; keys
-    that exist only in `secrets.local.toml` are read via this merged dict in `_secret_or_env`.
+    Locally, this allows password protection even if `.streamlit/secrets.toml`
+    can't be created (e.g., name collision with an existing folder).
     """
-    merged: dict[str, object] = {}
     candidates = [
         os.path.join(".streamlit", "secrets.toml"),
         os.path.join(".streamlit", "secrets.local.toml"),
@@ -107,11 +90,10 @@ def _load_local_secrets() -> dict[str, object]:
         try:
             with open(path, "rb") as f:
                 data = tomllib.load(f)
-            if isinstance(data, dict):
-                merged = _deep_merge_dict(merged, data)
+            return data if isinstance(data, dict) else {}
         except (OSError, tomllib.TOMLDecodeError):
             continue
-    return merged
+    return {}
 
 
 _LOCAL_SECRETS = _load_local_secrets()
@@ -616,11 +598,11 @@ def _sanitize_tenant_slug(raw: str) -> str:
 
 
 def _signup_requires_email_verification() -> bool:
-    """Self-signup sends a 6-digit code by email (SMTP). Set REQUIRE_EMAIL_VERIFICATION=false to skip."""
+    """Optional 6-digit email OTP (SMTP). Default off; set REQUIRE_EMAIL_VERIFICATION=true and SMTP_* to enable."""
     raw = _secret_first("REQUIRE_EMAIL_VERIFICATION", "EMAIL_VERIFICATION_REQUIRED")
     if raw is None or str(raw).strip() == "":
-        return True
-    return _coerce_bool(raw, True)
+        return False
+    return _coerce_bool(raw, False)
 
 
 def _verification_code_pepper() -> str:
@@ -794,8 +776,8 @@ def register_workspace(
     if verify_on and not _smtp_configured():
         return (
             False,
-            "Email verification requires SMTP. Add SMTP_HOST, SMTP_USER, and SMTP_PASSWORD to secrets "
-            "(for Gmail use an app password). Or set REQUIRE_EMAIL_VERIFICATION=false.",
+            "Email verification is turned on but SMTP is not configured. Add SMTP_HOST, SMTP_USER, "
+            "and SMTP_PASSWORD (Gmail: app password), or unset / set REQUIRE_EMAIL_VERIFICATION=false.",
             None,
         )
 
