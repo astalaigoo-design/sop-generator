@@ -1477,14 +1477,39 @@ div[data-testid="stExpander"] {{
   background: #FFFFFF;
 }}
 
+/* Expander toggle only — neutral bar (never theme primary / gradient bleed) */
+div[data-testid="stExpander"] summary {{
+  background: #F8FAFC !important;
+  color: #0F172A !important;
+}}
+div[data-testid="stExpander"] .streamlit-expanderHeader,
+div[data-testid="stExpander"] [data-testid="stExpanderToggle"] {{
+  background: #F8FAFC !important;
+  color: #0F172A !important;
+}}
+div[data-testid="stExpander"] .streamlit-expanderHeader button,
+div[data-testid="stExpander"] [data-testid="stExpanderToggle"],
+div[data-testid="stExpander"] details > summary {{
+  background-color: #F8FAFC !important;
+  background-image: none !important;
+  color: #0F172A !important;
+  box-shadow: none !important;
+  border: 1px solid #E2E8F0 !important;
+  border-radius: 8px !important;
+}}
+div[data-testid="stExpander"] .streamlit-expanderHeader button:hover {{
+  background-color: #F1F5F9 !important;
+}}
+
 h1, h2, h3, h4 {{
   letter-spacing: -0.02em;
   color: #0F172A !important;
 }}
 
+/* Tabs only — do not target bare button[data-baseweb="tab"] (breaks other Baseweb controls) */
 .stTabs [data-baseweb="tab"],
 .stTabs [role="tab"],
-button[data-baseweb="tab"] {{
+.stTabs button[data-baseweb="tab"] {{
   color: #475569 !important;
 }}
 .stTabs [aria-selected="true"],
