@@ -6,12 +6,11 @@ gatherUsageStats = false
 maxUploadSize = 50
 
 [theme]
-base = "dark"
-# Muted, dark-first defaults (overridden by CSS accents in app.py)
-primaryColor = "#7C3AED"
-backgroundColor = "#0B0F1A"
-secondaryBackgroundColor = "#121827"
-textColor = "#E6EAF2"
+base = "light"
+primaryColor = "#2563EB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8FAFC"
+textColor = "#0F172A"
 font = "sans serif"
 
 [client]
