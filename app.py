@@ -1404,88 +1404,108 @@ def build_branding_css(brand: dict[str, object]) -> str:
     sec = str(brand.get("secondary_color"))
     ac = str(brand.get("accent_color"))
 
-    shadow = _rgba(sec, 0.20)
-    shadow_h = _rgba(sec, 0.26)
-    shadow_a = _rgba(sec, 0.18)
+    shadow = _rgba(pr, 0.22)
+    shadow_h = _rgba(pr, 0.30)
+    shadow_a = _rgba(pr, 0.16)
 
     return f"""
 <style>
-/* ---- White-label UI (brand colors) ---- */
+/* ---- Light theme (aligned with .streamlit/config.toml [theme]) ---- */
 .stApp {{
-  /* Dark, muted base so the app doesn't feel overly bright */
-  background: radial-gradient(900px 500px at 10% 10%, {_rgba(pr, 0.10)}, transparent 60%),
-              radial-gradient(800px 520px at 90% 20%, {_rgba(sec, 0.10)}, transparent 55%),
-              radial-gradient(900px 600px at 50% 90%, {_rgba(ac, 0.08)}, transparent 60%),
-              linear-gradient(180deg, #0B0F1A 0%, #0A0D14 100%);
-  background-size: 120% 120%;
-  animation: bgShift 14s ease-in-out infinite;
-}}
-
-@keyframes bgShift {{
-  0%   {{ background-position: 0% 0%; }}
-  50%  {{ background-position: 100% 40%; }}
-  100% {{ background-position: 0% 0%; }}
+  background: #FFFFFF;
+  color: #0F172A;
 }}
 
 section[data-testid="stSidebar"] > div {{
-  background: rgba(18, 24, 39, 0.72);
-  backdrop-filter: blur(10px);
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: #F8FAFC !important;
+  border-right: 1px solid #E2E8F0;
+}}
+
+section[data-testid="stSidebar"] {{
+  color: #0F172A;
+}}
+
+section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] label {{
+  color: #0F172A !important;
+}}
+
+section[data-testid="stSidebar"] [data-testid="stRadio"] label {{
+  color: #0F172A !important;
 }}
 
 div.block-container {{
   padding-top: 1.25rem;
   padding-bottom: 2.5rem;
+  color: #0F172A;
 }}
 
-div.stButton > button {{
+/* Primary CTA only — do not restyle every button (fixes tabs / secondary) */
+div.stButton > button[kind="primary"],
+div.stButton > button[data-testid="baseButton-primary"] {{
   border: 0;
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 0.65rem 1rem;
   background: linear-gradient(135deg, {pr} 0%, {sec} 55%, {ac} 100%);
   color: white !important;
-  box-shadow: 0 10px 24px {shadow};
+  box-shadow: 0 8px 20px {shadow};
   transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
 }}
-div.stButton > button:hover {{
+div.stButton > button[kind="primary"]:hover,
+div.stButton > button[data-testid="baseButton-primary"]:hover {{
   transform: translateY(-1px);
-  box-shadow: 0 14px 28px {shadow_h};
+  box-shadow: 0 12px 26px {shadow_h};
   filter: saturate(1.05);
 }}
-div.stButton > button:active {{
+div.stButton > button[kind="primary"]:active,
+div.stButton > button[data-testid="baseButton-primary"]:active {{
   transform: translateY(0px) scale(0.99);
-  box-shadow: 0 8px 18px {shadow_a};
+  box-shadow: 0 6px 14px {shadow_a};
 }}
 
 div[data-baseweb="input"] input,
 div[data-baseweb="textarea"] textarea,
 div[data-baseweb="select"] > div {{
-  border-radius: 14px !important;
+  border-radius: 12px !important;
 }}
 
 div[data-testid="stExpander"] {{
-  border-radius: 16px;
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(18, 24, 39, 0.55);
-  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  border: 1px solid #E2E8F0;
+  background: #FFFFFF;
 }}
 
-h1, h2, h3 {{
+h1, h2, h3, h4 {{
   letter-spacing: -0.02em;
+  color: #0F172A !important;
 }}
 
-/* Sidebar: Sign out & secondary actions — not full-width gradient CTAs */
+.stTabs [data-baseweb="tab"],
+.stTabs [role="tab"],
+button[data-baseweb="tab"] {{
+  color: #475569 !important;
+}}
+.stTabs [aria-selected="true"],
+.stTabs [data-baseweb="tab"][aria-selected="true"] {{
+  color: #2563EB !important;
+  font-weight: 600 !important;
+}}
+
+/* Sidebar: secondary / sign out */
 section[data-testid="stSidebar"] button[data-testid="baseButton-secondary"],
 section[data-testid="stSidebar"] div.stButton > button[kind="secondary"] {{
-  background: rgba(255, 255, 255, 0.07) !important;
-  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  background: #FFFFFF !important;
+  border: 1px solid #CBD5E1 !important;
   box-shadow: none !important;
-  color: rgba(230, 234, 242, 0.95) !important;
+  color: #0F172A !important;
   padding: 0.4rem 0.75rem !important;
   font-size: 0.85rem !important;
 }}
 section[data-testid="stSidebar"] button[data-testid="baseButton-secondary"]:hover {{
-  filter: brightness(1.12);
+  background: #F1F5F9 !important;
+  filter: none !important;
   transform: none !important;
 }}
 </style>
@@ -3153,24 +3173,30 @@ _PAGE_MAP = {"✨ Generator": "Generator", "📂 Library": "Library", "⚙️ Se
 with st.sidebar:
     _has_custom_logo = bool(str(_brand.get("logo_url") or "").strip() or str(_brand.get("logo_path") or "").strip())
     if _has_custom_logo:
-        st.image(logo_url, width=220)
+        st.image(logo_url, width=180)
     else:
         st.markdown(
             """
-<div style="border: 1px dashed rgba(255,255,255,0.22); border-radius: 16px; padding: 18px; text-align: center; background: rgba(255,255,255,0.04); margin-bottom: 8px;">
-  <div style="font-weight: 700; letter-spacing: 0.04em; opacity: 0.9;">LOGO</div>
-  <div style="margin-top: 6px; font-size: 12px; opacity: 0.7;">Set <code>[branding] logo_path</code> in secrets</div>
+<div style="border: 1px dashed rgba(15,23,42,0.22); border-radius: 16px; padding: 14px; text-align: center; background: #FFFFFF; margin-bottom: 6px;">
+  <div style="font-weight: 700; letter-spacing: 0.04em; color: #0F172A;">LOGO</div>
+  <div style="margin-top: 6px; font-size: 12px; color: #475569;">Set <code>[branding] logo_path</code> in secrets</div>
 </div>
 """,
             unsafe_allow_html=True,
         )
+    _app_nm = str(_brand.get("app_name") or DEFAULT_BRANDING["app_name"])
     st.markdown(
-        f"<div style='text-align:center;font-weight:700;font-size:1.05rem;'>{str(_brand.get('app_name') or DEFAULT_BRANDING['app_name'])}</div>",
+        f"<div style='text-align:center;font-weight:700;font-size:1.05rem;color:#0F172A;'>{_app_nm}</div>",
         unsafe_allow_html=True,
     )
     st.caption("Professional Edition")
     st.markdown("### Workspace")
-    selected_page = st.radio("Go to", _PAGE_LABELS, label_visibility="collapsed")
+    selected_page = st.radio(
+        "Navigate",
+        _PAGE_LABELS,
+        label_visibility="visible",
+        key="sidebar_page_nav",
+    )
     active_page = _PAGE_MAP[selected_page]
     st.divider()
     with st.container(border=True):
