@@ -3102,12 +3102,55 @@ Do not invent details; if unclear, say "Unclear in image".
 
 logo_url = resolve_brand_logo_url(_brand)
 
-with st.sidebar:
-    auth = _current_user() or {}
-    tenant_id = auth.get("tenant_id")
-    user_id = auth.get("user_id")
-    user_role = str(auth.get("role") or "member")
+auth = _auth
+tenant_id = TENANT_ID
+user_id = USER_ID
+user_role = str(USER_ROLE or "member")
 
+# Load profile once per session, then use it as widget defaults.
+if "company_profile_loaded" not in st.session_state:
+    profile = load_company_profile(tenant_id=tenant_id)
+    st.session_state.company_profile_loaded = True
+    st.session_state.profile_audience = str(profile.get("audience", "") or "")
+    st.session_state.profile_tools_used = str(profile.get("tools_used", "") or "")
+    st.session_state.profile_compliance = str(profile.get("compliance_standard", "") or "")
+    st.session_state.profile_tone = str(profile.get("tone", "Professional") or "Professional")
+
+# Generator defaults (persist across pages via session_state keys).
+if "gen_template" not in st.session_state:
+    st.session_state.gen_template = "IT SOP"
+if "gen_strictness" not in st.session_state:
+    st.session_state.gen_strictness = "Detailed"
+if "gen_audience" not in st.session_state:
+    st.session_state.gen_audience = str(st.session_state.get("profile_audience") or "")
+if "gen_tools_used" not in st.session_state:
+    st.session_state.gen_tools_used = str(st.session_state.get("profile_tools_used") or "")
+if "gen_compliance" not in st.session_state:
+    pc = str(st.session_state.get("profile_compliance") or "").strip()
+    st.session_state.gen_compliance = "None" if not pc else pc
+if "gen_tone" not in st.session_state:
+    st.session_state.gen_tone = str(st.session_state.get("profile_tone") or "Professional")
+for _k, _v in (
+    ("gen_inc_definitions", True),
+    ("gen_inc_safety", True),
+    ("gen_inc_records", True),
+    ("gen_inc_checklist", True),
+):
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+if "rag_top_k" not in st.session_state:
+    st.session_state.rag_top_k = 6
+
+_existing_manual_rows = list_manual_docs(tenant_id=tenant_id)
+if "manual_multiselect_ids" not in st.session_state:
+    st.session_state.manual_multiselect_ids = (
+        [int(m["id"]) for m in _existing_manual_rows][:3] if _existing_manual_rows else []
+    )
+
+_PAGE_LABELS = ["✨ Generator", "📂 Library", "⚙️ Settings"]
+_PAGE_MAP = {"✨ Generator": "Generator", "📂 Library": "Library", "⚙️ Settings": "Settings"}
+
+with st.sidebar:
     _has_custom_logo = bool(str(_brand.get("logo_url") or "").strip() or str(_brand.get("logo_path") or "").strip())
     if _has_custom_logo:
         st.image(logo_url, width=220)
@@ -3126,19 +3169,24 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.caption("Professional Edition")
+    st.markdown("### Workspace")
+    selected_page = st.radio("Go to", _PAGE_LABELS, label_visibility="collapsed")
+    active_page = _PAGE_MAP[selected_page]
     st.divider()
-
-    st.markdown("### Navigation")
-    active_page = st.radio("Page", ["Generator", "Library"], horizontal=True, label_visibility="collapsed")
-
     with st.container(border=True):
-        st.caption(f"Signed in as **{auth.get('email','') or '—'}**")
-        if st.button("Sign out", type="secondary", use_container_width=True, key="sidebar_sign_out"):
-            st.session_state.pop("auth_user", None)
-            _clear_persistent_auth_cookie()
-            st.rerun()
+        st.caption(f"👤 **{auth.get('email', '') or '—'}**")
+        _c1, _c2 = st.columns([1, 2])
+        with _c2:
+            if st.button("Sign out", type="secondary", use_container_width=True, key="sidebar_sign_out"):
+                st.session_state.pop("auth_user", None)
+                _clear_persistent_auth_cookie()
+                st.rerun()
 
-    # Quotas / rate limits (per tenant)
+# Settings page (widgets must run before derived generation variables are read).
+if active_page == "Settings":
+    st.title("⚙️ Workspace settings")
+    st.caption("Company profile, knowledge base, generator defaults, and administration.")
+
     quota = get_or_create_quota(tenant_id=tenant_id)
     usage = usage_counts_today(tenant_id=tenant_id)
     with st.expander("Usage & quotas (today)", expanded=False):
@@ -3155,21 +3203,10 @@ with st.sidebar:
             }
         )
 
-    # Load profile once per session, then use it as widget defaults.
-    if "company_profile_loaded" not in st.session_state:
-        profile = load_company_profile(tenant_id=tenant_id)
-        st.session_state.company_profile_loaded = True
-        st.session_state.profile_audience = str(profile.get("audience", "") or "")
-        st.session_state.profile_tools_used = str(profile.get("tools_used", "") or "")
-        st.session_state.profile_compliance = str(profile.get("compliance_standard", "") or "")
-        st.session_state.profile_tone = str(profile.get("tone", "Professional") or "Professional")
-
-    st.markdown("### How to use")
     st.info(
-        "1. Enter a clear **Topic**.\n"
-        "2. Paste **raw notes** or a transcript.\n"
-        "3. Click **Generate SOP**.\n"
-        "4. Download as PDF if needed."
+        "1. Paste **notes** or capture **voice / vision** on **Generator**.\n"
+        "2. Adjust defaults here (template, tone, manuals).\n"
+        "3. Generate your SOP and export PDF/DOCX from the main workspace."
     )
 
     st.markdown("### Company profile")
@@ -3206,7 +3243,7 @@ with st.sidebar:
                     "tools_used": st.session_state.profile_tools_used,
                     "compliance_standard": st.session_state.profile_compliance,
                     "tone": st.session_state.profile_tone,
-                }
+                },
             )
             st.success("Saved.")
     with col_p2:
@@ -3222,20 +3259,19 @@ with st.sidebar:
                     "tools_used": "",
                     "compliance_standard": "",
                     "tone": "Professional",
-                }
+                },
             )
             st.success("Reset.")
 
     st.markdown("### Company Brain (RAG Lite)")
-    rag_top_k = st.slider("Manual snippets to use", 2, 10, 6, 1)
+    st.slider("Manual snippets to use", 2, 10, key="rag_top_k")
 
-    # Persisted per-tenant manuals (DB)
     existing_manuals = list_manual_docs(tenant_id=tenant_id)
     manual_label_by_id = {int(m["id"]): f'{m["name"]} ({m["sha256"][:10]}…)'.strip() for m in existing_manuals}
-    selected_manual_ids = st.multiselect(
+    st.multiselect(
         "Use these manuals",
         options=[int(m["id"]) for m in existing_manuals],
-        default=[int(m["id"]) for m in existing_manuals][:3],
+        key="manual_multiselect_ids",
         format_func=lambda mid: manual_label_by_id.get(int(mid), str(mid)),
         help="These manuals are saved per tenant and reused across sessions.",
     )
@@ -3255,9 +3291,8 @@ with st.sidebar:
                     res = upsert_manual_from_pdf(tenant_id=tenant_id, file_name=f.name, pdf_bytes=f.getvalue())
                     if res.get("stored"):
                         stored += 1
-                    else:
-                        if res.get("reason") == "duplicate":
-                            dupes += 1
+                    elif res.get("reason") == "duplicate":
+                        dupes += 1
                 except Exception as e:
                     log_exception(e, context="Save manual to library")
                     continue
@@ -3281,80 +3316,43 @@ with st.sidebar:
     else:
         st.caption("No manuals in the tenant library yet.")
 
-    # Load selected manuals into session for RAG usage downstream.
-    st.session_state.company_manual_docs = load_manual_docs_with_chunks(tenant_id=tenant_id, manual_doc_ids=selected_manual_ids)
-
-    # Keep the old "History (last 5)" in Generator mode only.
-    if active_page == "Generator":
-        st.markdown("### History (last 5)")
-        history_items = load_history(tenant_id=tenant_id, user_id=user_id, role=user_role, limit=5)
-        if history_items:
-            options = []
-            for i, it in enumerate(history_items):
-                ts = (it.get("ts") or "")[:19].replace("T", " ")
-                label = it.get("label") or it.get("template_name") or "SOP"
-                status = (it.get("status") or "draft").replace("_", " ")
-                options.append(f"{i+1}. {label} [{status}] — {ts}")
-
-            selected = st.selectbox("Saved SOPs", options, index=0)
-            sel_idx = int(selected.split(".")[0]) - 1
-            selected_item = history_items[sel_idx]
-
-            if st.button("Load into editor"):
-                st.session_state.current_sop_text = selected_item.get("sop_text", "") or ""
-                st.session_state.last_inferred_topic = selected_item.get("label", "SOP") or "SOP"
-                st.session_state.current_sop_doc_id = selected_item.get("sop_doc_id")
-                st.success("Loaded into editor.")
-        else:
-            st.caption("No saved SOPs yet.")
-
-    st.markdown("### Settings")
-    template_name = st.selectbox(
+    st.markdown("### Generator defaults")
+    st.selectbox(
         "Template",
         ["IT SOP", "HR SOP", "Warehouse SOP", "Restaurant SOP"],
-        index=0,
+        key="gen_template",
     )
-
-    strictness = st.radio("Strictness", ["Strict", "Detailed"], index=1, horizontal=True)
-
-    audience = st.text_input(
+    st.radio("Strictness", ["Strict", "Detailed"], key="gen_strictness", horizontal=True)
+    st.text_input(
         "Audience (optional)",
-        value=st.session_state.profile_audience,
+        key="gen_audience",
         placeholder="e.g., New hires, IT admins, Shift supervisors",
     )
-    tools_used = st.text_input(
+    st.text_input(
         "Tools used (optional)",
-        value=st.session_state.profile_tools_used,
+        key="gen_tools_used",
         placeholder="e.g., Okta, Jira, Google Workspace, Forklifts, POS system",
     )
-    compliance_standard = st.selectbox(
+    st.selectbox(
         "Compliance standard (optional)",
         ["None", "ISO 27001", "SOC 2", "HIPAA"],
-        index=0,
+        key="gen_compliance",
     )
-    compliance_standard = "" if compliance_standard == "None" else compliance_standard
-    tone = st.selectbox(
+    st.selectbox(
         "Tone",
         ["Professional", "Friendly", "Policy-like", "Concise"],
-        index=["Professional", "Friendly", "Policy-like", "Concise"].index(st.session_state.profile_tone)
-        if st.session_state.profile_tone in ["Professional", "Friendly", "Policy-like", "Concise"]
-        else 0,
+        key="gen_tone",
     )
 
     st.markdown("### Outline controls")
-    include_definitions = st.checkbox("Include Definitions section", value=True)
-    include_safety_compliance = st.checkbox("Include Safety/Compliance section", value=True)
-    include_records = st.checkbox("Include Records/Documentation section", value=True)
-    include_checklist = st.checkbox("Include Checklist section", value=True)
-
-    # Fixed temperature for stable outputs (removed "Creativity level" control)
-    temperature = 0.35
-    model="llama-3.1-8b-instant"
+    st.checkbox("Include Definitions section", key="gen_inc_definitions")
+    st.checkbox("Include Safety/Compliance section", key="gen_inc_safety")
+    st.checkbox("Include Records/Documentation section", key="gen_inc_records")
+    st.checkbox("Include Checklist section", key="gen_inc_checklist")
 
     if st.button("Clear cached results"):
         st.cache_data.clear()
 
-    # Tenant admin panel (MVP)
     if user_role == "admin":
         with st.expander("Admin (Users)", expanded=False):
             st.caption("Create users and manage access for this tenant.")
@@ -3375,7 +3373,14 @@ with st.sidebar:
                 selected_uid = st.selectbox(
                     "Select user",
                     options=[int(u["id"]) for u in users],
-                    format_func=lambda uid: next((f'{u["email"]} ({u["role"]}, {"active" if u["is_active"] else "disabled"})' for u in users if int(u["id"]) == int(uid)), str(uid)),
+                    format_func=lambda uid: next(
+                        (
+                            f'{u["email"]} ({u["role"]}, {"active" if u["is_active"] else "disabled"})'
+                            for u in users
+                            if int(u["id"]) == int(uid)
+                        ),
+                        str(uid),
+                    ),
                 )
                 selected_user = next((u for u in users if int(u["id"]) == int(selected_uid)), None)
                 if selected_user:
@@ -3384,7 +3389,11 @@ with st.sidebar:
                         toggle_label = "Disable user" if selected_user["is_active"] else "Enable user"
                         if st.button(toggle_label):
                             try:
-                                set_user_active(tenant_id=tenant_id, user_id=int(selected_uid), is_active=not selected_user["is_active"])
+                                set_user_active(
+                                    tenant_id=tenant_id,
+                                    user_id=int(selected_uid),
+                                    is_active=not selected_user["is_active"],
+                                )
                                 st.success("Updated.")
                                 st.rerun()
                             except Exception as e:
@@ -3393,7 +3402,11 @@ with st.sidebar:
                         reset_pwd = st.text_input("Reset password", type="password", key=f"reset_pwd_{selected_uid}")
                         if st.button("Set new password"):
                             try:
-                                reset_user_password(tenant_id=tenant_id, user_id=int(selected_uid), new_password=reset_pwd)
+                                reset_user_password(
+                                    tenant_id=tenant_id,
+                                    user_id=int(selected_uid),
+                                    new_password=reset_pwd,
+                                )
                                 st.success("Password updated.")
                             except Exception as e:
                                 show_busy_error(e, context="Reset password")
@@ -3402,9 +3415,15 @@ with st.sidebar:
             st.caption("Set per-tenant daily limits. Set to 0 to disable a feature.")
             q = get_or_create_quota(tenant_id=tenant_id)
             with st.form("set_quotas"):
-                gen_q = st.number_input("Generations per day", min_value=0, max_value=100000, value=int(q.get("generations_per_day", 0)))
-                tr_q = st.number_input("Transcriptions per day", min_value=0, max_value=100000, value=int(q.get("transcriptions_per_day", 0)))
-                vi_q = st.number_input("Vision analyses per day", min_value=0, max_value=100000, value=int(q.get("vision_analyses_per_day", 0)))
+                gen_q = st.number_input(
+                    "Generations per day", min_value=0, max_value=100000, value=int(q.get("generations_per_day", 0))
+                )
+                tr_q = st.number_input(
+                    "Transcriptions per day", min_value=0, max_value=100000, value=int(q.get("transcriptions_per_day", 0))
+                )
+                vi_q = st.number_input(
+                    "Vision analyses per day", min_value=0, max_value=100000, value=int(q.get("vision_analyses_per_day", 0))
+                )
                 if st.form_submit_button("Save quotas"):
                     try:
                         set_quota(
@@ -3418,11 +3437,26 @@ with st.sidebar:
                     except Exception as e:
                         show_busy_error(e, context="Set quotas")
 
+st.session_state.company_manual_docs = load_manual_docs_with_chunks(
+    tenant_id=tenant_id,
+    manual_doc_ids=list(st.session_state.get("manual_multiselect_ids") or []),
+)
 
-st.title(str(_brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
-_tag = header_tagline(_brand)
-if _tag:
-    st.caption(_tag)
+template_name = str(st.session_state.get("gen_template") or "IT SOP")
+strictness = str(st.session_state.get("gen_strictness") or "Detailed")
+audience = str(st.session_state.get("gen_audience") or "")
+tools_used = str(st.session_state.get("gen_tools_used") or "")
+_gen_comp = st.session_state.get("gen_compliance")
+compliance_standard = "" if _gen_comp in (None, "", "None") else str(_gen_comp)
+tone = str(st.session_state.get("gen_tone") or "Professional")
+include_definitions = bool(st.session_state.get("gen_inc_definitions", True))
+include_safety_compliance = bool(st.session_state.get("gen_inc_safety", True))
+include_records = bool(st.session_state.get("gen_inc_records", True))
+include_checklist = bool(st.session_state.get("gen_inc_checklist", True))
+rag_top_k = int(st.session_state.get("rag_top_k") or 6)
+
+temperature = 0.35
+model = "llama-3.1-8b-instant"
 
 if "notes" not in st.session_state:
     st.session_state.notes = ""
@@ -3435,105 +3469,158 @@ if not api_key:
     )
 
 if active_page == "Generator":
-    tab_text, tab_voice, tab_vision = st.tabs(["📝 Text input", "🎤 Voice mode", "📷 Vision mode"])
+    st.title(str(_brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
+    st.markdown("### What do you want to document today?")
+    _tag = header_tagline(_brand)
+    if _tag:
+        st.caption(_tag)
+
+    generate_btn = False
+    tab_text, tab_voice, tab_vision = st.tabs(
+        ["📝 Text / Notes", "🎤 Voice Recording", "🖼️ Vision / Image"]
+    )
 
     with tab_text:
-        st.caption("Paste notes here, or switch to Voice / Vision to fill this automatically.")
-        st.text_area(
-            "Input notes / raw text",
-            key="notes",
-            height=240,
-            placeholder="Paste your notes here (or use Voice / Vision tabs to generate notes).",
-            label_visibility="collapsed",
-        )
+        with st.container(border=True):
+            st.markdown("#### 📄 Paste your raw notes")
+            st.text_area(
+                "Input notes / raw text",
+                key="notes",
+                height=250,
+                placeholder="Paste rough notes, emails, or chat logs here…",
+                label_visibility="collapsed",
+            )
+            hc1, hc2, hc3 = st.columns([1, 2, 1])
+            with hc2:
+                generate_btn = st.button(
+                    "✨ Generate Standard Operating Procedure",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not api_key,
+                    key="hero_generate_sop",
+                )
 
     with tab_voice:
-        st.caption("Upload audio, transcribe it, then generate the SOP from the transcript (fills **Text input**).")
-        audio_file = st.file_uploader(
-            "Upload audio",
-            type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "webm"],
-            accept_multiple_files=False,
-        )
-        stt_model = st.selectbox(
-            "Speech-to-text model",
-            ["whisper-large-v3-turbo", "whisper-large-v3"],
-            index=0,
-        )
-        stt_language = st.text_input("Language (optional, ISO-639-1)", value="", placeholder="e.g., en")
-
-        if st.button("Transcribe audio", disabled=(not api_key or audio_file is None)):
-            try:
-                ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="transcribe", amount=1)
-                if not ok:
-                    st.error(msg)
-                    st.stop()
-                audio_bytes = audio_file.getvalue()
-                file_sha = hashlib.sha256(audio_bytes).hexdigest()
-                with st.spinner("Transcribing..."):
-                    transcript = transcribe_audio_cached(
-                        api_key=api_key,
-                        model=stt_model,
-                        file_name=audio_file.name,
-                        file_sha256=file_sha,
-                        audio_bytes=audio_bytes,
-                        language=stt_language.strip(),
-                    )
-                if transcript:
-                    st.session_state.notes = transcript
-                    st.success("Transcription complete. Open **Text input** to review or edit.")
-                else:
-                    st.error("Transcription returned empty text.")
-            except Exception as e:
-                show_busy_error(e, context="Transcribe audio")
+        with st.container(border=True):
+            st.markdown("#### 🎙️ Talk through the process")
+            st.info("Describe the task out loud. We will transcribe it and fill your **Text / Notes** tab.")
+            audio_rec = None
+            if hasattr(st, "audio_input"):
+                audio_rec = st.audio_input("Record audio", key="dash_audio_input")
+            st.caption("Or upload an audio file")
+            audio_file = st.file_uploader(
+                "Upload audio",
+                type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "webm"],
+                accept_multiple_files=False,
+                key="dash_audio_upload",
+            )
+            stt_model = st.selectbox(
+                "Speech-to-text model",
+                ["whisper-large-v3-turbo", "whisper-large-v3"],
+                index=0,
+                key="dash_stt_model",
+            )
+            stt_language = st.text_input(
+                "Language (optional, ISO-639-1)", value="", placeholder="e.g., en", key="dash_stt_lang"
+            )
+            _has_audio = (audio_rec is not None) or (audio_file is not None)
+            if st.button("Transcribe audio", disabled=(not api_key or not _has_audio), key="dash_transcribe"):
+                try:
+                    ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="transcribe", amount=1)
+                    if not ok:
+                        st.error(msg)
+                        st.stop()
+                    if audio_rec is not None:
+                        audio_bytes = audio_rec.getvalue()
+                        audio_name = getattr(audio_rec, "name", None) or "recording.webm"
+                    else:
+                        audio_bytes = audio_file.getvalue()
+                        audio_name = audio_file.name
+                    file_sha = hashlib.sha256(audio_bytes).hexdigest()
+                    with st.spinner("Transcribing..."):
+                        transcript = transcribe_audio_cached(
+                            api_key=api_key,
+                            model=stt_model,
+                            file_name=audio_name,
+                            file_sha256=file_sha,
+                            audio_bytes=audio_bytes,
+                            language=stt_language.strip(),
+                        )
+                    if transcript:
+                        st.session_state.notes = transcript
+                        st.success("Transcription complete. Switch to **Text / Notes** to review or edit.")
+                    else:
+                        st.error("Transcription returned empty text.")
+                except Exception as e:
+                    show_busy_error(e, context="Transcribe audio")
 
     with tab_vision:
-        st.caption("Upload an image (photo/screenshot). We'll extract structured notes into **Text input**.")
-        image_file = st.file_uploader(
-            "Upload image",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=False,
-        )
-        vision_model = st.selectbox(
-            "Vision model",
-            ["meta-llama/llama-4-scout-17b-16e-instruct"],
-            index=0,
-        )
+        with st.container(border=True):
+            st.markdown("#### 📸 Analyze a screenshot")
+            st.caption("Upload an interface screenshot or photo; we extract structured notes into **Text / Notes**.")
+            image_file = st.file_uploader(
+                "Upload interface screenshot",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=False,
+                key="dash_vision_upload",
+            )
+            vision_model = st.selectbox(
+                "Vision model",
+                ["meta-llama/llama-4-scout-17b-16e-instruct"],
+                index=0,
+                key="dash_vision_model",
+            )
+            if image_file is not None:
+                st.image(image_file, caption=image_file.name, use_container_width=True)
+            if st.button("Analyze image", disabled=(not api_key or image_file is None), key="dash_analyze_image"):
+                try:
+                    ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="vision", amount=1)
+                    if not ok:
+                        st.error(msg)
+                        st.stop()
+                    image_bytes = image_file.getvalue()
+                    file_sha = hashlib.sha256(image_bytes).hexdigest()
+                    mime_type = image_file.type or "image/png"
+                    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    with st.spinner("Analyzing image..."):
+                        extracted_notes = analyze_image_to_notes_cached(
+                            api_key=api_key,
+                            model=vision_model,
+                            file_sha256=file_sha,
+                            mime_type=mime_type,
+                            image_b64=image_b64,
+                        )
+                    if extracted_notes:
+                        st.session_state.notes = extracted_notes
+                        st.success("Image analysis complete. Switch to **Text / Notes** to review or edit.")
+                    else:
+                        st.error("Image analysis returned empty text.")
+                except Exception as e:
+                    show_busy_error(e, context="Analyze image")
 
-        if image_file is not None:
-            st.image(image_file, caption=image_file.name, use_container_width=True)
-
-        if st.button("Analyze image", disabled=(not api_key or image_file is None)):
-            try:
-                ok, msg = check_and_consume_quota(tenant_id=TENANT_ID, action="vision", amount=1)
-                if not ok:
-                    st.error(msg)
-                    st.stop()
-                image_bytes = image_file.getvalue()
-                file_sha = hashlib.sha256(image_bytes).hexdigest()
-                mime_type = image_file.type or "image/png"
-                image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-                with st.spinner("Analyzing image..."):
-                    extracted_notes = analyze_image_to_notes_cached(
-                        api_key=api_key,
-                        model=vision_model,
-                        file_sha256=file_sha,
-                        mime_type=mime_type,
-                        image_b64=image_b64,
-                    )
-
-                if extracted_notes:
-                    st.session_state.notes = extracted_notes
-                    st.success("Image analysis complete. Open **Text input** to review or edit.")
-                else:
-                    st.error("Image analysis returned empty text.")
-            except Exception as e:
-                show_busy_error(e, context="Analyze image")
+    with st.expander("Recent SOPs (last 5)", expanded=False):
+        history_items = load_history(tenant_id=tenant_id, user_id=user_id, role=user_role, limit=5)
+        if history_items:
+            options = []
+            for i, it in enumerate(history_items):
+                ts = (it.get("ts") or "")[:19].replace("T", " ")
+                label = it.get("label") or it.get("template_name") or "SOP"
+                status = (it.get("status") or "draft").replace("_", " ")
+                options.append(f"{i+1}. {label} [{status}] — {ts}")
+            selected = st.selectbox("Saved SOPs", options, index=0, key="dash_hist_pick")
+            sel_idx = int(selected.split(".")[0]) - 1
+            selected_item = history_items[sel_idx]
+            if st.button("Load into editor", key="dash_hist_load"):
+                st.session_state.current_sop_text = selected_item.get("sop_text", "") or ""
+                st.session_state.last_inferred_topic = selected_item.get("label", "SOP") or "SOP"
+                st.session_state.current_sop_doc_id = selected_item.get("sop_doc_id")
+                st.success("Loaded into editor.")
+        else:
+            st.caption("No saved SOPs yet.")
 
     notes = str(st.session_state.get("notes") or "")
-    generate = st.button("Generate SOP", type="primary", disabled=not api_key, use_container_width=True)
 
-    if generate:
+    if generate_btn:
         sop_text = ""
         if not notes.strip():
             st.error("Please paste your notes (or a transcript) first.")
@@ -3619,7 +3706,7 @@ if active_page == "Generator":
                 st.success("SOP generated. See 'Current SOP' below.")
 
 elif active_page == "Library":
-    st.subheader("SOP Library")
+    st.title("📂 SOP Library")
     if str(USER_ROLE or "").strip().lower() == "member":
         st.caption("Showing **your** SOPs only (saved under your account). Admins and reviewers see all workspace SOPs.")
     q = st.text_input("Search", value="", placeholder="Search by title or template…")
