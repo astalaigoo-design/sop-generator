@@ -1473,6 +1473,21 @@ div[data-testid="stExpander"] {{
 h1, h2, h3 {{
   letter-spacing: -0.02em;
 }}
+
+/* Sidebar: Sign out & secondary actions — not full-width gradient CTAs */
+section[data-testid="stSidebar"] button[data-testid="baseButton-secondary"],
+section[data-testid="stSidebar"] div.stButton > button[kind="secondary"] {{
+  background: rgba(255, 255, 255, 0.07) !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  box-shadow: none !important;
+  color: rgba(230, 234, 242, 0.95) !important;
+  padding: 0.4rem 0.75rem !important;
+  font-size: 0.85rem !important;
+}}
+section[data-testid="stSidebar"] button[data-testid="baseButton-secondary"]:hover {{
+  filter: brightness(1.12);
+  transform: none !important;
+}}
 </style>
 """
 
@@ -3093,14 +3108,32 @@ with st.sidebar:
     user_id = auth.get("user_id")
     user_role = str(auth.get("role") or "member")
 
+    _has_custom_logo = bool(str(_brand.get("logo_url") or "").strip() or str(_brand.get("logo_path") or "").strip())
+    if _has_custom_logo:
+        st.image(logo_url, width=220)
+    else:
+        st.markdown(
+            """
+<div style="border: 1px dashed rgba(255,255,255,0.22); border-radius: 16px; padding: 18px; text-align: center; background: rgba(255,255,255,0.04); margin-bottom: 8px;">
+  <div style="font-weight: 700; letter-spacing: 0.04em; opacity: 0.9;">LOGO</div>
+  <div style="margin-top: 6px; font-size: 12px; opacity: 0.7;">Set <code>[branding] logo_path</code> in secrets</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    st.markdown(
+        f"<div style='text-align:center;font-weight:700;font-size:1.05rem;'>{str(_brand.get('app_name') or DEFAULT_BRANDING['app_name'])}</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Professional Edition")
+    st.divider()
+
     st.markdown("### Navigation")
     active_page = st.radio("Page", ["Generator", "Library"], horizontal=True, label_visibility="collapsed")
 
-    col_auth1, col_auth2 = st.columns([3, 1])
-    with col_auth1:
-        st.caption(f"Signed in as **{auth.get('email','')}**")
-    with col_auth2:
-        if st.button("Sign out"):
+    with st.container(border=True):
+        st.caption(f"Signed in as **{auth.get('email','') or '—'}**")
+        if st.button("Sign out", type="secondary", use_container_width=True, key="sidebar_sign_out"):
             st.session_state.pop("auth_user", None)
             _clear_persistent_auth_cookie()
             st.rerun()
@@ -3131,23 +3164,6 @@ with st.sidebar:
         st.session_state.profile_compliance = str(profile.get("compliance_standard", "") or "")
         st.session_state.profile_tone = str(profile.get("tone", "Professional") or "Professional")
 
-    st.markdown("## Professional Edition")
-
-    _has_custom_logo = bool(str(_brand.get("logo_url") or "").strip() or str(_brand.get("logo_path") or "").strip())
-    if _has_custom_logo:
-        st.image(logo_url, width=160)
-    else:
-        st.markdown(
-            """
-<div style="border: 1px dashed rgba(255,255,255,0.22); border-radius: 16px; padding: 18px; text-align: center; background: rgba(255,255,255,0.04);">
-  <div style="font-weight: 700; letter-spacing: 0.04em; opacity: 0.9;">LOGO</div>
-  <div style="margin-top: 6px; font-size: 12px; opacity: 0.7;">Upload / configure a logo</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-    st.markdown(f"**{str(_brand.get('app_name') or DEFAULT_BRANDING['app_name'])}**")
     st.markdown("### How to use")
     st.info(
         "1. Enter a clear **Topic**.\n"
@@ -3403,14 +3419,10 @@ with st.sidebar:
                         show_busy_error(e, context="Set quotas")
 
 
-header_left, header_right = st.columns([1, 6])
-with header_left:
-    st.image(logo_url, width=70)
-with header_right:
-    st.title(str(_brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
-    _tag = header_tagline(_brand)
-    if _tag:
-        st.caption(_tag)
+st.title(str(_brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
+_tag = header_tagline(_brand)
+if _tag:
+    st.caption(_tag)
 
 if "notes" not in st.session_state:
     st.session_state.notes = ""
@@ -3423,8 +3435,20 @@ if not api_key:
     )
 
 if active_page == "Generator":
-    with st.expander("Voice Mode (Audio-to-SOP)", expanded=False):
-        st.caption("Upload an audio file, transcribe it, then generate the SOP from the transcript.")
+    tab_text, tab_voice, tab_vision = st.tabs(["📝 Text input", "🎤 Voice mode", "📷 Vision mode"])
+
+    with tab_text:
+        st.caption("Paste notes here, or switch to Voice / Vision to fill this automatically.")
+        st.text_area(
+            "Input notes / raw text",
+            key="notes",
+            height=240,
+            placeholder="Paste your notes here (or use Voice / Vision tabs to generate notes).",
+            label_visibility="collapsed",
+        )
+
+    with tab_voice:
+        st.caption("Upload audio, transcribe it, then generate the SOP from the transcript (fills **Text input**).")
         audio_file = st.file_uploader(
             "Upload audio",
             type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "webm"],
@@ -3456,14 +3480,14 @@ if active_page == "Generator":
                     )
                 if transcript:
                     st.session_state.notes = transcript
-                    st.success("Transcription complete. The Notes box below was filled.")
+                    st.success("Transcription complete. Open **Text input** to review or edit.")
                 else:
                     st.error("Transcription returned empty text.")
             except Exception as e:
                 show_busy_error(e, context="Transcribe audio")
 
-    with st.expander("Vision (Image Analysis)", expanded=False):
-        st.caption("Upload an image (photo/screenshot). We'll extract structured notes and fill the Notes box.")
+    with tab_vision:
+        st.caption("Upload an image (photo/screenshot). We'll extract structured notes into **Text input**.")
         image_file = st.file_uploader(
             "Upload image",
             type=["png", "jpg", "jpeg", "webp"],
@@ -3500,22 +3524,17 @@ if active_page == "Generator":
 
                 if extracted_notes:
                     st.session_state.notes = extracted_notes
-                    st.success("Image analysis complete. The Notes box below was filled.")
+                    st.success("Image analysis complete. Open **Text input** to review or edit.")
                 else:
                     st.error("Image analysis returned empty text.")
             except Exception as e:
                 show_busy_error(e, context="Analyze image")
 
-    notes = st.text_area(
-        "Input notes / raw text",
-        key="notes",
-        height=220,
-        placeholder="Paste your notes here (or use Voice Mode / Vision to generate notes).",
-    )
-
-    generate = st.button("Generate SOP", type="primary", disabled=not api_key)
+    notes = str(st.session_state.get("notes") or "")
+    generate = st.button("Generate SOP", type="primary", disabled=not api_key, use_container_width=True)
 
     if generate:
+        sop_text = ""
         if not notes.strip():
             st.error("Please paste your notes (or a transcript) first.")
         else:
