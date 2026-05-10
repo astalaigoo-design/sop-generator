@@ -37,6 +37,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    false as sql_false,
     inspect,
     select,
     text,
@@ -2037,19 +2038,36 @@ def load_recent_feedback(*, tenant_id: int | None, limit: int = 50) -> list[dict
         return []
 
 
-def load_history(*, tenant_id: int | None, limit: int = 5) -> list[dict]:
+def _user_sees_all_tenant_sops(role: str) -> bool:
+    """Workspace admins/reviewers see all SOPs; members only see documents they created."""
+    return str(role or "").strip().lower() in {"admin", "reviewer"}
+
+
+def _sop_doc_owner_clause(role: str, user_id: int | None):
+    """Employees (members): SopDoc.created_by_user_id matches user — same as JOIN users WHERE email = :current_email."""
+    if _user_sees_all_tenant_sops(role):
+        return None
+    if user_id is None:
+        return sql_false()
+    return SopDoc.created_by_user_id == int(user_id)
+
+
+def load_history(*, tenant_id: int | None, user_id: int | None, role: str, limit: int = 5) -> list[dict]:
     if tenant_id is None:
         return []
     try:
         _init_db()
+        own = _sop_doc_owner_clause(role, user_id)
         with _db() as s:
+            stmt = (
+                select(SopVersion)
+                .join(SopDoc, SopDoc.id == SopVersion.sop_doc_id)
+                .where(SopVersion.tenant_id == tenant_id)
+            )
+            if own is not None:
+                stmt = stmt.where(own)
             rows = (
-                s.execute(
-                    select(SopVersion)
-                    .where(SopVersion.tenant_id == tenant_id)
-                    .order_by(SopVersion.created_at.desc())
-                    .limit(int(limit))
-                )
+                s.execute(stmt.order_by(SopVersion.created_at.desc()).limit(int(limit)))
                 .scalars()
                 .all()
             )
@@ -2075,18 +2093,27 @@ def load_history(*, tenant_id: int | None, limit: int = 5) -> list[dict]:
         return []
 
 
-def load_doc_versions(*, tenant_id: int | None, sop_doc_id: int, limit: int = 25) -> list[dict]:
+def load_doc_versions(
+    *, tenant_id: int | None, sop_doc_id: int, user_id: int | None, role: str, limit: int = 25
+) -> list[dict]:
     if tenant_id is None:
         return []
     _init_db()
+    own = _sop_doc_owner_clause(role, user_id)
     with _db() as s:
-        rows = (
-            s.execute(
-                select(SopVersion)
-                .where(SopVersion.tenant_id == tenant_id, SopVersion.sop_doc_id == int(sop_doc_id))
-                .order_by(SopVersion.version.desc())
-                .limit(int(limit))
+        stmt = (
+            select(SopVersion)
+            .join(SopDoc, SopDoc.id == SopVersion.sop_doc_id)
+            .where(
+                SopVersion.tenant_id == tenant_id,
+                SopVersion.sop_doc_id == int(sop_doc_id),
+                SopDoc.tenant_id == tenant_id,
             )
+        )
+        if own is not None:
+            stmt = stmt.where(own)
+        rows = (
+            s.execute(stmt.order_by(SopVersion.version.desc()).limit(int(limit)))
             .scalars()
             .all()
         )
@@ -2112,14 +2139,20 @@ def diff_text(a: str, b: str) -> str:
     return "".join(difflib.unified_diff(a_lines, b_lines, fromfile="version_a", tofile="version_b"))
 
 
-def list_sop_docs(*, tenant_id: int | None, query: str = "", limit: int = 100) -> list[dict]:
+def list_sop_docs(
+    *, tenant_id: int | None, user_id: int | None, role: str, query: str = "", limit: int = 100
+) -> list[dict]:
     if tenant_id is None:
         return []
     q = (query or "").strip().lower()
+    own = _sop_doc_owner_clause(role, user_id)
     _init_db()
     with _db() as s:
+        stmt = select(SopDoc).where(SopDoc.tenant_id == tenant_id)
+        if own is not None:
+            stmt = stmt.where(own)
         docs = (
-            s.execute(select(SopDoc).where(SopDoc.tenant_id == tenant_id).order_by(SopDoc.created_at.desc()).limit(int(limit)))
+            s.execute(stmt.order_by(SopDoc.created_at.desc()).limit(int(limit)))
             .scalars()
             .all()
         )
@@ -2265,7 +2298,7 @@ def save_history(items: list[dict]) -> None:
     return
 
 
-def add_to_history(*, tenant_id: int | None, user_id: int | None, entry: dict) -> None:
+def add_to_history(*, tenant_id: int | None, user_id: int | None, role: str = "member", entry: dict) -> None:
     """Persist an SOP version into the tenant workspace (proper versioning per SOP doc)."""
     if tenant_id is None:
         return
@@ -2277,26 +2310,29 @@ def add_to_history(*, tenant_id: int | None, user_id: int | None, entry: dict) -
     source = str(entry.get("source") or "generated")
     change_note = str(entry.get("change_note") or "")
     sop_doc_id = entry.get("sop_doc_id")
+    own = _sop_doc_owner_clause(role, user_id)
 
     with _db() as s:
         doc: SopDoc | None = None
         if sop_doc_id is not None:
             try:
-                doc = s.execute(
-                    select(SopDoc).where(SopDoc.tenant_id == tenant_id, SopDoc.id == int(sop_doc_id))
-                ).scalar_one_or_none()
+                q = select(SopDoc).where(SopDoc.tenant_id == tenant_id, SopDoc.id == int(sop_doc_id))
+                if own is not None:
+                    q = q.where(own)
+                doc = s.execute(q).scalar_one_or_none()
             except Exception:
                 doc = None
 
         if doc is None:
-            # Reuse doc by (tenant, title, template) when possible.
-            doc = s.execute(
-                select(SopDoc).where(
-                    SopDoc.tenant_id == tenant_id,
-                    SopDoc.title == label,
-                    SopDoc.template_name == template_name,
-                )
-            ).scalar_one_or_none()
+            # Reuse doc by (tenant, title, template) when possible — scoped to this user for members.
+            q = select(SopDoc).where(
+                SopDoc.tenant_id == tenant_id,
+                SopDoc.title == label,
+                SopDoc.template_name == template_name,
+            )
+            if own is not None:
+                q = q.where(own)
+            doc = s.execute(q).scalar_one_or_none()
 
         if doc is None:
             doc = SopDoc(tenant_id=tenant_id, title=label, template_name=template_name, created_by_user_id=user_id)
@@ -2340,6 +2376,7 @@ def save_current_edits_as_new_version(
     *,
     tenant_id: int | None,
     user_id: int | None,
+    role: str,
     template_name: str,
     label: str,
     sop_text: str,
@@ -2349,6 +2386,7 @@ def save_current_edits_as_new_version(
     add_to_history(
         tenant_id=tenant_id,
         user_id=user_id,
+        role=role,
         entry={
             "ts": datetime.now(timezone.utc).isoformat(),
             "label": label,
@@ -2365,6 +2403,8 @@ def save_current_edits_as_new_version(
 def update_sop_version_status(
     *,
     tenant_id: int | None,
+    user_id: int | None,
+    role: str,
     sop_version_id: int,
     new_status: str,
     approved_by_user_id: int | None,
@@ -2374,18 +2414,21 @@ def update_sop_version_status(
     new_status = (new_status or "").strip().lower()
     if new_status not in {"draft", "in_review", "approved"}:
         return
+    own = _sop_doc_owner_clause(role, user_id)
     _init_db()
     with _db() as s:
-        v = (
-            s.execute(
-                select(SopVersion).where(
-                    SopVersion.tenant_id == tenant_id,
-                    SopVersion.id == int(sop_version_id),
-                )
+        stmt = (
+            select(SopVersion)
+            .join(SopDoc, SopDoc.id == SopVersion.sop_doc_id)
+            .where(
+                SopVersion.tenant_id == tenant_id,
+                SopVersion.id == int(sop_version_id),
+                SopDoc.tenant_id == tenant_id,
             )
-            .scalars()
-            .one_or_none()
         )
+        if own is not None:
+            stmt = stmt.where(own)
+        v = s.execute(stmt).scalars().one_or_none()
         if v is None:
             return
         v.status = new_status
@@ -2395,21 +2438,24 @@ def update_sop_version_status(
         s.commit()
 
 
-def delete_sop_version(*, tenant_id: int | None, sop_version_id: int) -> None:
+def delete_sop_version(*, tenant_id: int | None, user_id: int | None, role: str, sop_version_id: int) -> None:
     if tenant_id is None:
         return
+    own = _sop_doc_owner_clause(role, user_id)
     _init_db()
     with _db() as s:
-        v = (
-            s.execute(
-                select(SopVersion).where(
-                    SopVersion.tenant_id == tenant_id,
-                    SopVersion.id == int(sop_version_id),
-                )
+        stmt = (
+            select(SopVersion)
+            .join(SopDoc, SopDoc.id == SopVersion.sop_doc_id)
+            .where(
+                SopVersion.tenant_id == tenant_id,
+                SopVersion.id == int(sop_version_id),
+                SopDoc.tenant_id == tenant_id,
             )
-            .scalars()
-            .one_or_none()
         )
+        if own is not None:
+            stmt = stmt.where(own)
+        v = s.execute(stmt).scalars().one_or_none()
         if v is None:
             return
         s.delete(v)
@@ -3196,7 +3242,7 @@ with st.sidebar:
     # Keep the old "History (last 5)" in Generator mode only.
     if active_page == "Generator":
         st.markdown("### History (last 5)")
-        history_items = load_history(tenant_id=tenant_id, limit=5)
+        history_items = load_history(tenant_id=tenant_id, user_id=user_id, role=user_role, limit=5)
         if history_items:
             options = []
             for i, it in enumerate(history_items):
@@ -3493,6 +3539,7 @@ if active_page == "Generator":
                     add_to_history(
                         tenant_id=TENANT_ID,
                         user_id=USER_ID,
+                        role=USER_ROLE,
                         entry={
                             "ts": datetime.now(timezone.utc).isoformat(),
                             "label": inferred_topic,
@@ -3501,7 +3548,7 @@ if active_page == "Generator":
                             "sop_text": sop_text,
                             "sop_sha256": sop_fingerprint(sop_text),
                             "sop_doc_id": st.session_state.get("current_sop_doc_id"),
-                        }
+                        },
                     )
                 except Exception as e:
                     show_busy_error(e, context="Generate SOP")
@@ -3525,8 +3572,10 @@ if active_page == "Generator":
 
 elif active_page == "Library":
     st.subheader("SOP Library")
+    if str(USER_ROLE or "").strip().lower() == "member":
+        st.caption("Showing **your** SOPs only (saved under your account). Admins and reviewers see all workspace SOPs.")
     q = st.text_input("Search", value="", placeholder="Search by title or template…")
-    docs = list_sop_docs(tenant_id=TENANT_ID, query=q, limit=200)
+    docs = list_sop_docs(tenant_id=TENANT_ID, user_id=USER_ID, role=USER_ROLE, query=q, limit=200)
     if not docs:
         st.info("No SOPs yet.")
     else:
@@ -3543,7 +3592,9 @@ elif active_page == "Library":
         st.markdown(st.session_state.current_sop_text or "")
 
         with st.expander("Versions", expanded=False):
-            versions = load_doc_versions(tenant_id=TENANT_ID, sop_doc_id=int(doc["id"]), limit=50)
+            versions = load_doc_versions(
+                tenant_id=TENANT_ID, sop_doc_id=int(doc["id"]), user_id=USER_ID, role=USER_ROLE, limit=50
+            )
             v_labels = [
                 f'v{v["version"]} · {str(v["status"]).replace("_"," ")} · {(v["ts"] or "")[:19].replace("T"," ")} · {v.get("source","")}'
                 for v in versions
@@ -3597,6 +3648,7 @@ if current_sop:
                     save_current_edits_as_new_version(
                         tenant_id=TENANT_ID,
                         user_id=USER_ID,
+                        role=USER_ROLE,
                         template_name=template_name,
                         label=str(st.session_state.get("last_inferred_topic") or "SOP"),
                         sop_text=edited_current,
@@ -3658,6 +3710,7 @@ if api_key and last_sop:
                 add_to_history(
                     tenant_id=TENANT_ID,
                     user_id=USER_ID,
+                    role=USER_ROLE,
                     entry={
                         "ts": datetime.now(timezone.utc).isoformat(),
                         "label": f"{inferred_topic} (revised)",
@@ -3665,7 +3718,7 @@ if api_key and last_sop:
                         "source": "revised",
                         "sop_text": fixed,
                         "sop_sha256": sop_fingerprint(fixed),
-                    }
+                    },
                 )
             except Exception as e:
                 show_busy_error()
@@ -3706,6 +3759,7 @@ if api_key and last_sop:
                         save_current_edits_as_new_version(
                             tenant_id=TENANT_ID,
                             user_id=USER_ID,
+                            role=USER_ROLE,
                             template_name=template_name,
                             label=str(st.session_state.get("last_inferred_topic") or "SOP"),
                             sop_text=edited_rev,
