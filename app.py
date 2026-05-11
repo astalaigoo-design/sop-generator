@@ -605,6 +605,28 @@ def _signup_requires_email_verification() -> bool:
     return _coerce_bool(raw, False)
 
 
+def _ensure_user_verified_if_optional(*, user_id: int) -> bool:
+    """If email verification is off, clear stuck unverified rows so login/session works.
+
+    Returns True if the user may proceed (verified or auto-fixed). False only when
+    verification is required and the user is still unverified.
+    """
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        if u is None:
+            return False
+        if getattr(u, "email_verified", True):
+            return True
+        if _signup_requires_email_verification():
+            return False
+        u.email_verified = True
+        u.verification_token = None
+        u.verification_expires_at = None
+        s.commit()
+        return True
+
+
 def _verification_code_pepper() -> str:
     return (
         _normalize_secret_value(_secret_first("VERIFICATION_CODE_PEPPER"))
@@ -665,75 +687,6 @@ def send_email_verification_code(
         log_exception(ex, context="SMTP send verification code")
         return False, str(ex)[:240]
     return True, ""
-
-
-def verify_email_with_code(*, email: str, code: str) -> bool:
-    """Validate 6-digit code and mark the user verified."""
-    email_n = _normalize_email(email)
-    h = _hash_verification_code_digits(code)
-    if not email_n or not h:
-        return False
-    _init_db()
-    now = datetime.now(timezone.utc)
-    try:
-        with _db() as s:
-            u = s.execute(select(User).where(User.email == email_n)).scalars().first()
-            if u is None:
-                return False
-            if getattr(u, "email_verified", True) is True:
-                return True
-            if str(u.verification_token or "") != h:
-                return False
-            exp = u.verification_expires_at
-            if exp is not None and exp.tzinfo is None:
-                exp = exp.replace(tzinfo=timezone.utc)
-            if exp is not None and exp < now:
-                return False
-            u.email_verified = True
-            u.verification_token = None
-            u.verification_expires_at = None
-            s.commit()
-        return True
-    except Exception as ex:
-        log_exception(ex, context="Verify email with code")
-        return False
-
-
-def resend_verification_email(*, email: str) -> tuple[bool, str]:
-    """Issue a new 6-digit code and email it (SMTP must be configured)."""
-    email_n = _normalize_email(email)
-    if not email_n:
-        return False, "Enter your email address."
-    if not _smtp_configured():
-        return False, "SMTP is not configured. Add SMTP_* secrets (see .streamlit/secrets.toml.example)."
-    hrs = _coerce_int(_secret_first("VERIFICATION_LINK_EXPIRY_HOURS"), 48)
-    if hrs < 1:
-        hrs = 48
-    brand_name = str(get_initial_branding().get("app_name") or DEFAULT_BRANDING["app_name"])
-    _init_db()
-    try:
-        with _db() as s:
-            u = s.execute(select(User).where(User.email == email_n)).scalars().first()
-            if u is None:
-                return False, "No account found for that email."
-            if getattr(u, "email_verified", True) is True:
-                return False, "That email is already verified. Sign in."
-            plain = _generate_email_otp()
-            u.verification_token = _hash_verification_code_digits(plain)
-            u.verification_expires_at = datetime.now(timezone.utc) + timedelta(hours=hrs)
-            s.commit()
-        ok, err = send_email_verification_code(
-            to_email=email_n,
-            code=plain,
-            expires_hours=hrs,
-            app_name=brand_name,
-        )
-        if ok:
-            return True, "Check your email for a new 6-digit code."
-        return False, f"Could not send email: {err}"
-    except Exception as ex:
-        log_exception(ex, context="Resend verification email")
-        return False, "Could not send a new code. Try again."
 
 
 def _mask_email(addr: str) -> str:
@@ -834,13 +787,11 @@ def register_workspace(
             "email_sent": ok_send,
         }
         if ok_send:
-            msg = (
-                "Workspace created. We emailed a 6-digit code — use **Enter verification code** under Sign in."
-            )
+            msg = "Workspace created. Check your email for a 6-digit verification code, then sign in."
         else:
             msg = (
                 f"Workspace created, but email failed ({send_err}). "
-                "Fix SMTP secrets, then use **Resend verification code**."
+                "Fix SMTP secrets or ask an administrator to verify your account."
             )
         return True, msg, extra
 
@@ -1113,7 +1064,7 @@ def _restore_auth_from_signed_cookie() -> None:
             if u is None or u.is_active is False:
                 _clear_persistent_auth_cookie()
                 return
-            if getattr(u, "email_verified", True) is False:
+            if getattr(u, "email_verified", True) is False and not _ensure_user_verified_if_optional(user_id=u.id):
                 _clear_persistent_auth_cookie()
                 return
             st.session_state.auth_user = {
@@ -1143,12 +1094,6 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
     user = _current_user()
     if user:
         return
-
-    vf = st.session_state.pop("_verify_flash", None)
-    if vf == "ok":
-        st.success("Email verified. You can sign in below.")
-    elif vf == "err":
-        st.error("Invalid or expired verification code.")
 
     st.title(str(brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
     st.caption("Sign in or create your organization workspace.")
@@ -1216,6 +1161,15 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                         debug_login = _secret_first("DEBUG_LOGIN")
                         show_debug = debug_login is not None and str(debug_login).strip() != "" and _coerce_bool(debug_login, False)
 
+                        if u is not None and getattr(u, "email_verified", True) is False and not _signup_requires_email_verification():
+                            row = s.get(User, u.id)
+                            if row is not None:
+                                row.email_verified = True
+                                row.verification_token = None
+                                row.verification_expires_at = None
+                                s.commit()
+                            u = s.execute(select(User).where(User.email == email_n)).scalars().first()
+
                         if u is None:
                             st.error("Invalid email or password.")
                             if show_debug:
@@ -1225,8 +1179,8 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                             st.error("This account is disabled. Contact your administrator.")
                         elif getattr(u, "email_verified", True) is False:
                             st.error(
-                                "Email not verified yet. Enter your **verification code** below, "
-                                "or use **Resend verification code**."
+                                "Email not verified yet. Check your inbox for the code we sent, "
+                                "or contact your administrator."
                             )
                         elif not u.password_hash or not str(u.password_hash).strip():
                             st.error("Account error: missing password hash. Reset password via admin or bootstrap.")
@@ -1263,29 +1217,6 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                 except Exception as e:
                     show_busy_error(e, context="Login")
 
-        with st.expander("Enter verification code"):
-            st.caption("Enter the **6-digit code** we emailed you after signup.")
-            with st.form("verify_email_otp"):
-                vemail = st.text_input("Your email", key="verify_otp_email")
-                vcode = st.text_input("6-digit code", max_chars=8, key="verify_otp_code")
-                if st.form_submit_button("Verify email"):
-                    if verify_email_with_code(email=vemail.strip(), code=vcode.strip()):
-                        st.session_state["_verify_flash"] = "ok"
-                        st.rerun()
-                    else:
-                        st.error("Invalid code, wrong email, or code expired.")
-
-        with st.expander("Resend verification code"):
-            st.caption("If you did not receive the code or it expired, request a new one (requires SMTP).")
-            with st.form("resend_verification"):
-                r_email = st.text_input("Your email", key="resend_v_email")
-                if st.form_submit_button("Send new code"):
-                    ok_r, out = resend_verification_email(email=r_email)
-                    if ok_r:
-                        st.success(out)
-                    else:
-                        st.error(out)
-
     with tab_signup:
         if not signup_ok:
             st.info(
@@ -1320,13 +1251,11 @@ def _require_auth_ui(brand: dict[str, object]) -> None:
                             if extra:
                                 masked = extra.get("masked_email") or ""
                                 if extra.get("email_sent"):
-                                    st.info(
-                                        f"Code sent to **{masked}**. Enter it under **Sign in → Enter verification code**."
-                                    )
+                                    st.info(f"Verification code sent to **{masked}**.")
                                 else:
                                     st.warning(
-                                        "Configure SMTP (see `.streamlit/secrets.toml.example`), "
-                                        "then use **Resend verification code**."
+                                        "Email could not be sent. Configure SMTP in secrets (see "
+                                        "`.streamlit/secrets.toml.example`) or contact support."
                                     )
                                 st.caption(f"Code expires in ~{extra.get('expires_hours', 48)} hours.")
                         else:
