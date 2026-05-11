@@ -2412,8 +2412,11 @@ def _free_tier_max_exports() -> int:
     return max(0, _coerce_int(_secret_or_env("FREE_TIER_MAX_DOWNLOADS"), 1))
 
 
+_DEFAULT_CREDITS_URL = "https://asta-laigoo.lemonsqueezy.com/checkout/buy/8a34621e-4fb3-47e3-bced-6944e3cff869"
+
+
 def _credits_purchase_url() -> str:
-    return (_secret_or_env("CREDITS_PURCHASE_URL") or "").strip()
+    return (_secret_or_env("CREDITS_PURCHASE_URL") or _DEFAULT_CREDITS_URL).strip()
 
 
 def _user_paywall_exempt(user_id: int | None) -> bool:
@@ -2429,10 +2432,7 @@ def _user_paywall_exempt(user_id: int | None) -> bool:
 
 def render_paywall_cta() -> None:
     url = _credits_purchase_url()
-    if url:
-        st.link_button("🛒 Buy Credits", url, use_container_width=True, type="primary")
-    else:
-        st.caption("Contact your administrator to unlock more credits.")
+    st.link_button("🛒 Buy Credits", url, use_container_width=True, type="primary")
 
 
 def render_credits_dashboard(user_id: int | None) -> None:
