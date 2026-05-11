@@ -2430,13 +2430,13 @@ def _user_paywall_exempt(user_id: int | None) -> bool:
 def render_paywall_cta() -> None:
     url = _credits_purchase_url()
     if url:
-        st.link_button("Purchase credits or upgrade →", url, use_container_width=True, type="primary")
+        st.link_button("🛒 Buy Credits", url, use_container_width=True, type="primary")
     else:
-        st.caption("Contact your administrator to unlock more usage.")
+        st.caption("Contact your administrator to unlock more credits.")
 
 
-def render_free_tier_paywall_banner(user_id: int | None) -> None:
-    """Prominent notice + purchase CTA when free-tier generations or exports are exhausted."""
+def render_credits_dashboard(user_id: int | None) -> None:
+    """Always-visible credits panel: what a credit is, how many remain, and Buy Credits button."""
     if user_id is None or _free_tier_globally_disabled() or _user_paywall_exempt(user_id):
         return
     max_g = _free_tier_max_generations()
@@ -2448,30 +2448,43 @@ def render_free_tier_paywall_banner(user_id: int | None) -> None:
         u = s.get(User, int(user_id))
         gu = int(getattr(u, "free_generations_used", 0) or 0) if u is not None else 0
         eu = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
-    rg = max(0, max_g - gu) if max_g > 0 else 0
-    re = max(0, max_e - eu) if max_e > 0 else 0
+    rg = max(0, max_g - gu)
+    re = max(0, max_e - eu)
     no_gen = max_g > 0 and rg == 0
     no_exp = max_e > 0 and re == 0
-    if not (no_gen or no_exp):
-        return
+
     with st.container(border=True):
+        st.markdown("#### 🎟️ Your Credits")
+        st.caption(
+            "**1 Credit = 1 Generated SOP.** Each time you click **Generate**, "
+            "one credit is used. Export credits let you download as PDF or DOCX."
+        )
+        col_g, col_e = st.columns(2)
+        with col_g:
+            if no_gen:
+                st.metric("Generation Credits", "0", delta="used up", delta_color="inverse")
+            else:
+                st.metric("Generation Credits", str(rg), delta=f"of {max_g} free")
+        with col_e:
+            if no_exp:
+                st.metric("Export Credits", "0", delta="used up", delta_color="inverse")
+            else:
+                st.metric("Export Credits", str(re), delta=f"of {max_e} free")
+
         if no_gen and no_exp:
             st.error(
-                "**Free trial ended** — you've used all included SOP generations and PDF/DOCX exports "
-                "for your account. Purchase credits to keep going."
+                "**Free trial ended.** You've used all your generation and export credits. "
+                "Buy more to continue creating and downloading SOPs."
             )
         elif no_gen:
-            st.warning(
-                "**Free generations used up** — purchase credits to generate more SOPs."
-            )
-        else:
-            st.warning(
-                "**Free export used up** — purchase credits to download PDF or DOCX again."
-            )
+            st.warning("**Generation credits used up.** Buy more credits to generate new SOPs.")
+        elif no_exp:
+            st.warning("**Export credit used up.** Buy more credits to download PDF or DOCX files.")
         render_paywall_cta()
 
 
 def free_tier_status_caption(user_id: int | None) -> str | None:
+    """Short one-liner for inline use (e.g. sidebar). The full dashboard is render_credits_dashboard."""
     if user_id is None or _free_tier_globally_disabled() or _user_paywall_exempt(user_id):
         return None
     max_g = _free_tier_max_generations()
@@ -2483,7 +2496,7 @@ def free_tier_status_caption(user_id: int | None) -> str | None:
         eu = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
     rg = max(0, max_g - gu)
     re = max(0, max_e - eu)
-    return f"Free tier: **{rg}** generation(s) and **{re}** PDF/DOCX export(s) remaining."
+    return f"🎟️ **{rg}** generation credit(s) · **{re}** export credit(s) remaining"
 
 
 def check_user_generation_budget(user_id: int | None) -> tuple[bool, str]:
@@ -3458,6 +3471,9 @@ with st.sidebar:
     st.divider()
     with st.container(border=True):
         st.caption(f"👤 **{auth.get('email', '') or '—'}**")
+        _sidebar_ft_cap = free_tier_status_caption(USER_ID)
+        if _sidebar_ft_cap:
+            st.caption(_sidebar_ft_cap)
         _c1, _c2 = st.columns([1, 2])
         with _c2:
             if st.button("Sign out", type="secondary", use_container_width=True, key="sidebar_sign_out"):
@@ -3741,10 +3757,7 @@ if active_page == "Generator":
     _tag = header_tagline(_brand)
     if _tag:
         st.caption(_tag)
-    _ft_cap = free_tier_status_caption(USER_ID)
-    if _ft_cap:
-        st.caption(_ft_cap)
-    render_free_tier_paywall_banner(USER_ID)
+    render_credits_dashboard(USER_ID)
 
     _ft_ok_gen, _ = check_user_generation_budget(USER_ID)
     _ft_disabled = _free_tier_globally_disabled()
