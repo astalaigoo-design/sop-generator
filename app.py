@@ -2430,9 +2430,45 @@ def _user_paywall_exempt(user_id: int | None) -> bool:
 def render_paywall_cta() -> None:
     url = _credits_purchase_url()
     if url:
-        st.markdown(f"[Purchase credits or upgrade]({url})")
+        st.link_button("Purchase credits or upgrade →", url, use_container_width=True, type="primary")
     else:
         st.caption("Contact your administrator to unlock more usage.")
+
+
+def render_free_tier_paywall_banner(user_id: int | None) -> None:
+    """Prominent notice + purchase CTA when free-tier generations or exports are exhausted."""
+    if user_id is None or _free_tier_globally_disabled() or _user_paywall_exempt(user_id):
+        return
+    max_g = _free_tier_max_generations()
+    max_e = _free_tier_max_exports()
+    if max_g <= 0 and max_e <= 0:
+        return
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        gu = int(getattr(u, "free_generations_used", 0) or 0) if u is not None else 0
+        eu = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
+    rg = max(0, max_g - gu) if max_g > 0 else 0
+    re = max(0, max_e - eu) if max_e > 0 else 0
+    no_gen = max_g > 0 and rg == 0
+    no_exp = max_e > 0 and re == 0
+    if not (no_gen or no_exp):
+        return
+    with st.container(border=True):
+        if no_gen and no_exp:
+            st.error(
+                "**Free trial ended** — you've used all included SOP generations and PDF/DOCX exports "
+                "for your account. Purchase credits to keep going."
+            )
+        elif no_gen:
+            st.warning(
+                "**Free generations used up** — purchase credits to generate more SOPs."
+            )
+        else:
+            st.warning(
+                "**Free export used up** — purchase credits to download PDF or DOCX again."
+            )
+        render_paywall_cta()
 
 
 def free_tier_status_caption(user_id: int | None) -> str | None:
@@ -3434,22 +3470,6 @@ if active_page == "Settings":
     st.title("⚙️ Workspace settings")
     st.caption("Company profile, knowledge base, generator defaults, and administration.")
 
-    quota = get_or_create_quota(tenant_id=tenant_id)
-    usage = usage_counts_today(tenant_id=tenant_id)
-    with st.expander("Usage & quotas (today)", expanded=False):
-        st.caption(f"Date: {_today_key()}")
-        st.caption(f"Database: {_database_backend_label()}")
-        st.write(
-            {
-                "generations_used": usage.get("generate", 0),
-                "generations_limit": quota.get("generations_per_day", 0),
-                "transcriptions_used": usage.get("transcribe", 0),
-                "transcriptions_limit": quota.get("transcriptions_per_day", 0),
-                "vision_used": usage.get("vision", 0),
-                "vision_limit": quota.get("vision_analyses_per_day", 0),
-            }
-        )
-
     st.info(
         "1. Paste **notes** or capture **voice / vision** on **Generator**.\n"
         "2. Adjust defaults here (template, tone, manuals).\n"
@@ -3724,6 +3744,7 @@ if active_page == "Generator":
     _ft_cap = free_tier_status_caption(USER_ID)
     if _ft_cap:
         st.caption(_ft_cap)
+    render_free_tier_paywall_banner(USER_ID)
 
     _ft_ok_gen, _ = check_user_generation_budget(USER_ID)
     _ft_disabled = _free_tier_globally_disabled()
