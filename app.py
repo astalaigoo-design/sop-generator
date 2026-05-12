@@ -3476,15 +3476,13 @@ with st.sidebar:
     st.divider()
     with st.container(border=True):
         st.caption(f"👤 **{auth.get('email', '') or '—'}**")
-        _sidebar_ft_cap = free_tier_status_caption(USER_ID)
-        if _sidebar_ft_cap:
-            st.caption(_sidebar_ft_cap)
         _c1, _c2 = st.columns([1, 2])
         with _c2:
             if st.button("Sign out", type="secondary", use_container_width=True, key="sidebar_sign_out"):
                 st.session_state.pop("auth_user", None)
                 _clear_persistent_auth_cookie()
                 st.rerun()
+    render_credits_dashboard(USER_ID)
 
 # Settings page (widgets must run before derived generation variables are read).
 if active_page == "Settings":
@@ -3758,11 +3756,8 @@ if not api_key:
 
 if active_page == "Generator":
     st.title(str(_brand.get("app_name") or DEFAULT_BRANDING["app_name"]))
-    st.markdown("### What do you want to document today?")
-    _tag = header_tagline(_brand)
-    if _tag:
-        st.caption(_tag)
-    render_credits_dashboard(USER_ID)
+    st.markdown("Turn messy notes into professional **Standard Operating Procedures** in seconds.")
+    st.markdown("✅ AI-powered &nbsp; ✅ Export to PDF &nbsp; ✅ Save to your Library")
 
     _ft_ok_gen, _ = check_user_generation_budget(USER_ID)
     _ft_disabled = _free_tier_globally_disabled()
