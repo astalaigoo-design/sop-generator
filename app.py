@@ -3456,11 +3456,6 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
     _app_nm = str(_brand.get("app_name") or DEFAULT_BRANDING["app_name"])
-    st.markdown(
-        f"<div style='text-align:center;font-weight:700;font-size:1.05rem;color:#0F172A;'>{_app_nm}</div>",
-        unsafe_allow_html=True,
-    )
-    st.caption("Professional Edition")
     st.markdown("### Workspace")
     selected_page = st.radio(
         "Navigate",
