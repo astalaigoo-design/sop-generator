@@ -2476,12 +2476,15 @@ def render_credits_dashboard(user_id: int | None) -> None:
                 "**Free trial ended.** You've used all your generation and export credits. "
                 "Buy more to continue creating and downloading SOPs."
             )
+            st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
             render_paywall_cta()
         elif no_gen:
             st.warning("**Generation credits used up.** Buy more credits to generate new SOPs.")
+            st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
             render_paywall_cta()
         elif no_exp:
             st.warning("**Export credit used up.** Buy more credits to download PDF or DOCX files.")
+            st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
             render_paywall_cta()
 
 
