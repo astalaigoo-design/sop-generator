@@ -2480,42 +2480,47 @@ def render_credits_dashboard(user_id: int | None) -> None:
 
     with st.container(border=True):
         st.markdown("#### 🎟️ Your Credits")
-        st.caption(
-            "**1 Credit = 1 Generated SOP or 1 PDF/DOCX export.** "
-            "Free credits are used first, then purchased credits."
-        )
-        col_g, col_e, col_p = st.columns(3)
-        with col_g:
-            if no_free_gen:
-                st.metric("Free Generations", "0", delta="used up", delta_color="inverse")
-            else:
-                st.metric("Free Generations", str(rg), delta=f"of {max_g}")
-        with col_e:
-            if no_free_exp:
-                st.metric("Free Exports", "0", delta="used up", delta_color="inverse")
-            else:
-                st.metric("Free Exports", str(re), delta=f"of {max_e}")
-        with col_p:
-            if has_purchased:
-                st.metric("Purchased Credits", str(purchased), delta="available")
-            else:
-                st.metric("Purchased Credits", "0")
-
-        all_exhausted = no_free_gen and no_free_exp and not has_purchased
-        if all_exhausted:
-            st.error(
-                "**All credits used up.** You've used all free and purchased credits. "
-                "Buy more to continue creating and downloading SOPs."
+        if has_purchased:
+            st.caption(
+                "**1 Credit = 1 Generated SOP.** "
+                "All PDF/DOCX downloads are **free** with purchased credits."
             )
-            st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
-            render_paywall_cta()
-        elif no_free_gen and not has_purchased:
-            st.warning("**Generation credits used up.** Buy more credits to generate new SOPs.")
-            st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
+            col_g, col_p = st.columns(2)
+            with col_g:
+                if no_free_gen:
+                    st.metric("Free Generations", "0", delta="used up", delta_color="inverse")
+                else:
+                    st.metric("Free Generations", str(rg), delta=f"of {max_g}")
+            with col_p:
+                st.metric("Purchased Credits", str(purchased), delta="available")
+            st.success("✅ Downloads are **unlimited** with your purchased credits.")
+        else:
+            st.caption(
+                "**1 Credit = 1 Generated SOP.** "
+                "Buy credits to unlock unlimited downloads."
+            )
+            col_g, col_e = st.columns(2)
+            with col_g:
+                if no_free_gen:
+                    st.metric("Free Generations", "0", delta="used up", delta_color="inverse")
+                else:
+                    st.metric("Free Generations", str(rg), delta=f"of {max_g}")
+            with col_e:
+                if no_free_exp:
+                    st.metric("Free Downloads", "0", delta="used up", delta_color="inverse")
+                else:
+                    st.metric("Free Downloads", str(re), delta=f"of {max_e}")
+
+        no_credits_at_all = no_free_gen and not has_purchased
+        if no_credits_at_all:
+            st.error(
+                "**Credits used up.** Buy more to continue generating SOPs."
+            )
+            st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs + unlimited downloads!")
             render_paywall_cta()
         elif no_free_exp and not has_purchased:
-            st.warning("**Export credit used up.** Buy more credits to download PDF or DOCX files.")
-            st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
+            st.warning("**Free download used up.** Buy credits to unlock unlimited downloads.")
+            st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs + unlimited downloads!")
             render_paywall_cta()
 
         st.divider()
@@ -2554,8 +2559,8 @@ def free_tier_status_caption(user_id: int | None) -> str | None:
     rg = max(0, max_g - gu)
     re = max(0, max_e - eu)
     if purchased > 0:
-        return f"🎟️ **{rg}** free gen · **{re}** free export · **{purchased}** purchased"
-    return f"🎟️ **{rg}** generation(s) · **{re}** export(s) remaining"
+        return f"🎟️ **{purchased}** credits · downloads free"
+    return f"🎟️ **{rg}** free gen · **{re}** free download"
 
 
 def _get_purchased_credits(user_id: int) -> int:
@@ -2735,50 +2740,51 @@ def record_user_generation_success(user_id: int | None) -> None:
 
 
 def check_user_export_budget(user_id: int | None) -> tuple[bool, str]:
+    """Downloads are free for users who have purchased credits. Only free-tier users are limited."""
     if user_id is None or _free_tier_globally_disabled():
         return True, ""
     if _user_paywall_exempt(user_id):
+        return True, ""
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        purchased = int(getattr(u, "purchased_credits", 0) or 0) if u is not None else 0
+    if purchased > 0:
         return True, ""
     max_e = _free_tier_max_exports()
     if max_e <= 0:
         return False, "PDF/DOCX downloads are disabled for your account."
-    _init_db()
     with _db() as s:
         u = s.get(User, int(user_id))
         used = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
-        purchased = int(getattr(u, "purchased_credits", 0) or 0) if u is not None else 0
     if used < max_e:
-        return True, ""
-    if purchased > 0:
         return True, ""
     return (
         False,
-        "You've used all your credits. Purchase more to export PDF/DOCX.",
+        "Free download used up. Buy credits to unlock unlimited downloads.",
     )
 
 
 def try_consume_export_click(user_id: int | None) -> None:
-    """Deduct from free exports first, then purchased credits."""
+    """Only deduct from free export quota. Purchased credit users get free downloads."""
     if user_id is None or _free_tier_globally_disabled():
         return
     if _user_paywall_exempt(user_id):
-        return
-    max_e = _free_tier_max_exports()
-    if max_e <= 0:
         return
     _init_db()
     with _db() as s:
         u = s.get(User, int(user_id))
         if u is None:
             return
+        if int(getattr(u, "purchased_credits", 0) or 0) > 0:
+            return
+        max_e = _free_tier_max_exports()
+        if max_e <= 0:
+            return
         free_used = int(getattr(u, "free_exports_used", 0) or 0)
         if free_used < max_e:
             u.free_exports_used = free_used + 1
-        else:
-            bal = int(getattr(u, "purchased_credits", 0) or 0)
-            if bal > 0:
-                u.purchased_credits = bal - 1
-        s.commit()
+            s.commit()
 
 
 def render_paywalled_pdf_docx_downloads(
