@@ -3,6 +3,9 @@ import json
 import os
 import re
 import tomllib
+import urllib.request
+import urllib.parse
+import urllib.error
 
 from collections.abc import Mapping
 
@@ -434,6 +437,16 @@ class DailyUsage(Base):
     action: Mapped[str] = mapped_column(String(40), index=True)  # generate | transcribe | vision
     count: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class RedeemedLicense(Base):
+    __tablename__ = "redeemed_licenses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    license_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    credits_granted: Mapped[int] = mapped_column(Integer, default=0)
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 @st.cache_resource
@@ -2505,6 +2518,26 @@ def render_credits_dashboard(user_id: int | None) -> None:
             st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
             render_paywall_cta()
 
+        st.divider()
+        st.markdown("🔑 **Have a license key?**")
+        with st.form("redeem_license_form", clear_on_submit=True):
+            license_input = st.text_input(
+                "License key",
+                placeholder="Paste your license key here",
+                type="password",
+            )
+            if st.form_submit_button("Redeem"):
+                if license_input.strip():
+                    with st.spinner("Validating license..."):
+                        ok, msg = redeem_license_key(int(user_id), license_input)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("Please enter a license key.")
+
 
 def free_tier_status_caption(user_id: int | None) -> str | None:
     """Short one-liner for inline use (e.g. sidebar). The full dashboard is render_credits_dashboard."""
@@ -2558,6 +2591,101 @@ def grant_credits(user_id: int, amount: int) -> int:
         u.purchased_credits = cur + amount
         s.commit()
         return u.purchased_credits
+
+
+def _lemonsqueezy_api_key() -> str:
+    return (_secret_or_env("LEMONSQUEEZY_API_KEY") or "").strip()
+
+
+def _credits_per_license() -> int:
+    raw = _secret_or_env("LEMONSQUEEZY_CREDITS_PER_LICENSE")
+    try:
+        return int(raw) if raw else 100
+    except (ValueError, TypeError):
+        return 100
+
+
+def _license_already_redeemed(license_key: str) -> bool:
+    _init_db()
+    with _db() as s:
+        existing = s.query(RedeemedLicense).filter_by(license_key=license_key.strip()).first()
+        return existing is not None
+
+
+def validate_and_activate_license(license_key: str, instance_name: str) -> dict:
+    """Call LemonSqueezy /v1/licenses/activate. Returns parsed JSON response."""
+    url = "https://api.lemonsqueezy.com/v1/licenses/activate"
+    data = urllib.parse.urlencode({
+        "license_key": license_key.strip(),
+        "instance_name": instance_name,
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"activated": False, "error": f"HTTP {e.code}: {body[:300]}"}
+    except Exception as ex:
+        return {"activated": False, "error": str(ex)[:300]}
+
+
+def validate_license_only(license_key: str) -> dict:
+    """Call LemonSqueezy /v1/licenses/validate (no activation)."""
+    url = "https://api.lemonsqueezy.com/v1/licenses/validate"
+    data = urllib.parse.urlencode({
+        "license_key": license_key.strip(),
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"valid": False, "error": f"HTTP {e.code}: {body[:300]}"}
+    except Exception as ex:
+        return {"valid": False, "error": str(ex)[:300]}
+
+
+def redeem_license_key(user_id: int, license_key: str) -> tuple[bool, str]:
+    """Validate a license key, grant credits, record redemption. Returns (success, message)."""
+    key = license_key.strip()
+    if not key:
+        return False, "Please enter a license key."
+
+    if _license_already_redeemed(key):
+        return False, "This license key has already been redeemed."
+
+    result = validate_license_only(key)
+    is_valid = result.get("valid", False) or result.get("activated", False)
+    error = result.get("error")
+    status = (result.get("license_key") or {}).get("status", "")
+
+    if not is_valid and status != "active":
+        msg = error or "Invalid or expired license key."
+        return False, msg
+
+    credits = _credits_per_license()
+    new_bal = grant_credits(user_id, credits)
+
+    _init_db()
+    with _db() as s:
+        s.add(RedeemedLicense(
+            user_id=user_id,
+            license_key=key,
+            credits_granted=credits,
+        ))
+        s.commit()
+
+    return True, f"License redeemed! {credits} credits added. New balance: {new_bal}"
 
 
 def check_user_generation_budget(user_id: int | None) -> tuple[bool, str]:
