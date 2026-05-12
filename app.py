@@ -4008,6 +4008,9 @@ if active_page == "Generator":
                     disabled=hero_gen_disabled,
                     key="hero_generate_sop",
                 )
+                if hero_gen_disabled and api_key:
+                    st.error("🚫 You have **0 credits** remaining. Buy credits to generate SOPs.")
+                    render_paywall_cta()
 
     with tab_voice:
         with st.container(border=True):
