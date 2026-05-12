@@ -312,6 +312,8 @@ class User(Base):
     free_generations_used: Mapped[int] = mapped_column(Integer, default=0)
     free_exports_used: Mapped[int] = mapped_column(Integer, default=0)
     paywall_exempt: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Purchased credits (each credit = 1 generation OR 1 export). Consumed after free tier is exhausted.
+    purchased_credits: Mapped[int] = mapped_column(Integer, default=0)
 
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
@@ -489,6 +491,8 @@ def _migrate_user_paywall_columns(engine) -> None:
                 conn.execute(text("ALTER TABLE users ADD COLUMN paywall_exempt BOOLEAN DEFAULT 0"))
             else:
                 conn.execute(text("ALTER TABLE users ADD COLUMN paywall_exempt BOOLEAN DEFAULT FALSE"))
+        if "purchased_credits" not in cols:
+            conn.execute(text("ALTER TABLE users ADD COLUMN purchased_credits INTEGER DEFAULT 0"))
 
 
 def _init_db() -> None:
@@ -2444,41 +2448,50 @@ def render_credits_dashboard(user_id: int | None) -> None:
         u = s.get(User, int(user_id))
         gu = int(getattr(u, "free_generations_used", 0) or 0) if u is not None else 0
         eu = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
+        purchased = int(getattr(u, "purchased_credits", 0) or 0) if u is not None else 0
     rg = max(0, max_g - gu)
     re = max(0, max_e - eu)
-    no_gen = max_g > 0 and rg == 0
-    no_exp = max_e > 0 and re == 0
+    total_available = rg + re + purchased
+    no_free_gen = max_g > 0 and rg == 0
+    no_free_exp = max_e > 0 and re == 0
+    has_purchased = purchased > 0
 
     with st.container(border=True):
         st.markdown("#### 🎟️ Your Credits")
         st.caption(
-            "**1 Credit = 1 Generated SOP.** Each time you click **Generate**, "
-            "one credit is used. Export credits let you download as PDF or DOCX."
+            "**1 Credit = 1 Generated SOP or 1 PDF/DOCX export.** "
+            "Free credits are used first, then purchased credits."
         )
-        col_g, col_e = st.columns(2)
+        col_g, col_e, col_p = st.columns(3)
         with col_g:
-            if no_gen:
-                st.metric("Generation Credits", "0", delta="used up", delta_color="inverse")
+            if no_free_gen:
+                st.metric("Free Generations", "0", delta="used up", delta_color="inverse")
             else:
-                st.metric("Generation Credits", str(rg), delta=f"of {max_g} free")
+                st.metric("Free Generations", str(rg), delta=f"of {max_g}")
         with col_e:
-            if no_exp:
-                st.metric("Export Credits", "0", delta="used up", delta_color="inverse")
+            if no_free_exp:
+                st.metric("Free Exports", "0", delta="used up", delta_color="inverse")
             else:
-                st.metric("Export Credits", str(re), delta=f"of {max_e} free")
+                st.metric("Free Exports", str(re), delta=f"of {max_e}")
+        with col_p:
+            if has_purchased:
+                st.metric("Purchased Credits", str(purchased), delta="available")
+            else:
+                st.metric("Purchased Credits", "0")
 
-        if no_gen and no_exp:
+        all_exhausted = no_free_gen and no_free_exp and not has_purchased
+        if all_exhausted:
             st.error(
-                "**Free trial ended.** You've used all your generation and export credits. "
+                "**All credits used up.** You've used all free and purchased credits. "
                 "Buy more to continue creating and downloading SOPs."
             )
             st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
             render_paywall_cta()
-        elif no_gen:
+        elif no_free_gen and not has_purchased:
             st.warning("**Generation credits used up.** Buy more credits to generate new SOPs.")
             st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
             render_paywall_cta()
-        elif no_exp:
+        elif no_free_exp and not has_purchased:
             st.warning("**Export credit used up.** Buy more credits to download PDF or DOCX files.")
             st.info("💰 **Get 100 credits for only $9 USD** — generate up to 100 SOPs!")
             render_paywall_cta()
@@ -2495,9 +2508,47 @@ def free_tier_status_caption(user_id: int | None) -> str | None:
         u = s.get(User, int(user_id))
         gu = int(getattr(u, "free_generations_used", 0) or 0) if u is not None else 0
         eu = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
+        purchased = int(getattr(u, "purchased_credits", 0) or 0) if u is not None else 0
     rg = max(0, max_g - gu)
     re = max(0, max_e - eu)
-    return f"🎟️ **{rg}** generation credit(s) · **{re}** export credit(s) remaining"
+    if purchased > 0:
+        return f"🎟️ **{rg}** free gen · **{re}** free export · **{purchased}** purchased"
+    return f"🎟️ **{rg}** generation(s) · **{re}** export(s) remaining"
+
+
+def _get_purchased_credits(user_id: int) -> int:
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        return int(getattr(u, "purchased_credits", 0) or 0) if u else 0
+
+
+def _consume_purchased_credit(user_id: int) -> bool:
+    """Deduct 1 purchased credit. Returns True if successful."""
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        if u is None:
+            return False
+        bal = int(getattr(u, "purchased_credits", 0) or 0)
+        if bal <= 0:
+            return False
+        u.purchased_credits = bal - 1
+        s.commit()
+        return True
+
+
+def grant_credits(user_id: int, amount: int) -> int:
+    """Add purchased credits to a user. Returns new balance."""
+    _init_db()
+    with _db() as s:
+        u = s.get(User, int(user_id))
+        if u is None:
+            return 0
+        cur = int(getattr(u, "purchased_credits", 0) or 0)
+        u.purchased_credits = cur + amount
+        s.commit()
+        return u.purchased_credits
 
 
 def check_user_generation_budget(user_id: int | None) -> tuple[bool, str]:
@@ -2512,12 +2563,15 @@ def check_user_generation_budget(user_id: int | None) -> tuple[bool, str]:
     with _db() as s:
         u = s.get(User, int(user_id))
         used = int(getattr(u, "free_generations_used", 0) or 0) if u is not None else 0
-    if used >= max_g:
-        return (
-            False,
-            "You've used all free SOP generations for your account. Purchase credits to generate more.",
-        )
-    return True, ""
+        purchased = int(getattr(u, "purchased_credits", 0) or 0) if u is not None else 0
+    if used < max_g:
+        return True, ""
+    if purchased > 0:
+        return True, ""
+    return (
+        False,
+        "You've used all your credits. Purchase more to generate SOPs.",
+    )
 
 
 def record_user_generation_success(user_id: int | None) -> None:
@@ -2533,10 +2587,13 @@ def record_user_generation_success(user_id: int | None) -> None:
         u = s.get(User, int(user_id))
         if u is None:
             return
-        cur = int(getattr(u, "free_generations_used", 0) or 0)
-        if cur >= max_g:
-            return
-        u.free_generations_used = cur + 1
+        free_used = int(getattr(u, "free_generations_used", 0) or 0)
+        if free_used < max_g:
+            u.free_generations_used = free_used + 1
+        else:
+            bal = int(getattr(u, "purchased_credits", 0) or 0)
+            if bal > 0:
+                u.purchased_credits = bal - 1
         s.commit()
 
 
@@ -2552,16 +2609,19 @@ def check_user_export_budget(user_id: int | None) -> tuple[bool, str]:
     with _db() as s:
         u = s.get(User, int(user_id))
         used = int(getattr(u, "free_exports_used", 0) or 0) if u is not None else 0
-    if used >= max_e:
-        return (
-            False,
-            "You've used your free PDF/DOCX download. Purchase credits to export again.",
-        )
-    return True, ""
+        purchased = int(getattr(u, "purchased_credits", 0) or 0) if u is not None else 0
+    if used < max_e:
+        return True, ""
+    if purchased > 0:
+        return True, ""
+    return (
+        False,
+        "You've used all your credits. Purchase more to export PDF/DOCX.",
+    )
 
 
 def try_consume_export_click(user_id: int | None) -> None:
-    """Increment PDF/DOCX export usage when the user clicks a download button (on_click)."""
+    """Deduct from free exports first, then purchased credits."""
     if user_id is None or _free_tier_globally_disabled():
         return
     if _user_paywall_exempt(user_id):
@@ -2574,10 +2634,13 @@ def try_consume_export_click(user_id: int | None) -> None:
         u = s.get(User, int(user_id))
         if u is None:
             return
-        cur = int(getattr(u, "free_exports_used", 0) or 0)
-        if cur >= max_e:
-            return
-        u.free_exports_used = cur + 1
+        free_used = int(getattr(u, "free_exports_used", 0) or 0)
+        if free_used < max_e:
+            u.free_exports_used = free_used + 1
+        else:
+            bal = int(getattr(u, "purchased_credits", 0) or 0)
+            if bal > 0:
+                u.purchased_credits = bal - 1
         s.commit()
 
 
@@ -3472,6 +3535,9 @@ with st.sidebar:
         st.session_state.pop("auth_user", None)
         _clear_persistent_auth_cookie()
         st.rerun()
+    st.divider()
+    st.markdown("📩 **Need help?**")
+    st.markdown("[Contact Support](mailto:ASTALAIGOO@GMAIL.COM)")
 
 # Settings page (widgets must run before derived generation variables are read).
 if active_page == "Settings":
@@ -3685,6 +3751,28 @@ if active_page == "Settings":
                                 st.success("Password updated.")
                             except Exception as e:
                                 show_busy_error(e, context="Reset password")
+
+                    st.divider()
+                    st.markdown("**Credits**")
+                    _sel_purchased = _get_purchased_credits(int(selected_uid))
+                    st.caption(f"Current purchased credits: **{_sel_purchased}**")
+                    col_cr1, col_cr2 = st.columns([2, 1])
+                    with col_cr1:
+                        credits_to_add = st.number_input(
+                            "Credits to add",
+                            min_value=1,
+                            max_value=10000,
+                            value=100,
+                            step=10,
+                            key=f"credits_add_{selected_uid}",
+                        )
+                    with col_cr2:
+                        st.markdown("")
+                        st.markdown("")
+                        if st.button("Grant credits", key=f"grant_credits_{selected_uid}"):
+                            new_bal = grant_credits(int(selected_uid), int(credits_to_add))
+                            st.success(f"Granted {int(credits_to_add)} credits. New balance: {new_bal}")
+                            st.rerun()
 
         with st.expander("Admin (Quotas)", expanded=False):
             st.caption("Set per-tenant daily limits. Set to 0 to disable a feature.")
