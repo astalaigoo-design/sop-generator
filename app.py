@@ -451,6 +451,14 @@ def _engine(database_url: str):
     return create_engine(url, **kw)
 
 
+def _safe_add_column(conn, ddl: str) -> None:
+    """Execute an ALTER TABLE ADD COLUMN, silently ignoring 'already exists' errors."""
+    try:
+        conn.execute(text(ddl))
+    except Exception:
+        pass
+
+
 def _migrate_user_verification_columns(engine) -> None:
     """Add email verification columns to existing deployments (Neon/SQLite)."""
     try:
@@ -462,16 +470,16 @@ def _migrate_user_verification_columns(engine) -> None:
     with engine.begin() as conn:
         if "email_verified" not in cols:
             if dialect == "sqlite":
-                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT 1"))
+                _safe_add_column(conn, "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT 1")
             else:
-                conn.execute(text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT TRUE"))
+                _safe_add_column(conn, "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT TRUE")
         if "verification_token" not in cols:
-            conn.execute(text("ALTER TABLE users ADD COLUMN verification_token VARCHAR(128)"))
+            _safe_add_column(conn, "ALTER TABLE users ADD COLUMN verification_token VARCHAR(128)")
         if "verification_expires_at" not in cols:
             if dialect == "sqlite":
-                conn.execute(text("ALTER TABLE users ADD COLUMN verification_expires_at TIMESTAMP"))
+                _safe_add_column(conn, "ALTER TABLE users ADD COLUMN verification_expires_at TIMESTAMP")
             else:
-                conn.execute(text("ALTER TABLE users ADD COLUMN verification_expires_at TIMESTAMP WITH TIME ZONE"))
+                _safe_add_column(conn, "ALTER TABLE users ADD COLUMN verification_expires_at TIMESTAMP WITH TIME ZONE")
 
 
 def _migrate_user_paywall_columns(engine) -> None:
@@ -481,18 +489,19 @@ def _migrate_user_paywall_columns(engine) -> None:
     except Exception:
         return
     dialect = engine.dialect.name
+
     with engine.begin() as conn:
         if "free_generations_used" not in cols:
-            conn.execute(text("ALTER TABLE users ADD COLUMN free_generations_used INTEGER DEFAULT 0"))
+            _safe_add_column(conn, "ALTER TABLE users ADD COLUMN free_generations_used INTEGER DEFAULT 0")
         if "free_exports_used" not in cols:
-            conn.execute(text("ALTER TABLE users ADD COLUMN free_exports_used INTEGER DEFAULT 0"))
+            _safe_add_column(conn, "ALTER TABLE users ADD COLUMN free_exports_used INTEGER DEFAULT 0")
         if "paywall_exempt" not in cols:
             if dialect == "sqlite":
-                conn.execute(text("ALTER TABLE users ADD COLUMN paywall_exempt BOOLEAN DEFAULT 0"))
+                _safe_add_column(conn, "ALTER TABLE users ADD COLUMN paywall_exempt BOOLEAN DEFAULT 0")
             else:
-                conn.execute(text("ALTER TABLE users ADD COLUMN paywall_exempt BOOLEAN DEFAULT FALSE"))
+                _safe_add_column(conn, "ALTER TABLE users ADD COLUMN paywall_exempt BOOLEAN DEFAULT FALSE")
         if "purchased_credits" not in cols:
-            conn.execute(text("ALTER TABLE users ADD COLUMN purchased_credits INTEGER DEFAULT 0"))
+            _safe_add_column(conn, "ALTER TABLE users ADD COLUMN purchased_credits INTEGER DEFAULT 0")
 
 
 def _init_db() -> None:
