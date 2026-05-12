@@ -3476,13 +3476,12 @@ with st.sidebar:
     st.divider()
     with st.container(border=True):
         st.caption(f"👤 **{auth.get('email', '') or '—'}**")
-        _c1, _c2 = st.columns([1, 2])
-        with _c2:
-            if st.button("Sign out", type="secondary", use_container_width=True, key="sidebar_sign_out"):
-                st.session_state.pop("auth_user", None)
-                _clear_persistent_auth_cookie()
-                st.rerun()
     render_credits_dashboard(USER_ID)
+    st.divider()
+    if st.button("Sign out", type="secondary", use_container_width=True, key="sidebar_sign_out"):
+        st.session_state.pop("auth_user", None)
+        _clear_persistent_auth_cookie()
+        st.rerun()
 
 # Settings page (widgets must run before derived generation variables are read).
 if active_page == "Settings":
