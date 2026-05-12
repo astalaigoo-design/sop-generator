@@ -1555,14 +1555,10 @@ section[data-testid="stSidebar"] button[data-testid="baseButton-secondary"]:hove
 
 
 SVG_CODE = """
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 80" width="240" height="80">
-  <rect x="0" y="0" width="240" height="80" fill="#ffffff" rx="12" ry="12"/>
-  <g transform="translate(20,40)">
-    <circle cx="0" cy="0" r="24" fill="#0A74DA"/>
-    <circle cx="8" cy="-6" r="12" fill="#ffffff"/>
-  </g>
-  <text x="70" y="48" font-family="Arial" font-size="36" font-weight="600" fill="#222222">SOP</text>
-  <text x="70" y="70" font-family="Arial" font-size="14" fill="#555555">AI Generator</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 70" width="280" height="70">
+  <rect x="0" y="0" width="280" height="70" fill="#ffffff" rx="10" ry="10"/>
+  <text x="16" y="48" font-family="Arial,Helvetica,sans-serif" font-size="40" font-weight="700" fill="#2563EB">F</text>
+  <text x="42" y="48" font-family="Arial,Helvetica,sans-serif" font-size="34" font-weight="700" fill="#2563EB">Fluency</text>
 </svg>
 """.strip()
 
@@ -3474,10 +3470,9 @@ with st.sidebar:
     )
     active_page = _PAGE_MAP[selected_page]
     st.divider()
-    with st.container(border=True):
-        st.caption(f"👤 **{auth.get('email', '') or '—'}**")
     render_credits_dashboard(USER_ID)
     st.divider()
+    st.caption(f"👤 {auth.get('email', '') or '—'}")
     if st.button("Sign out", type="secondary", use_container_width=True, key="sidebar_sign_out"):
         st.session_state.pop("auth_user", None)
         _clear_persistent_auth_cookie()
